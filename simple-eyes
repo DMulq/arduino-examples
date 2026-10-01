@@ -1,0 +1,177 @@
+#include <Arduino.h>
+#include "Arduino_GFX_Library.h"
+#include "Arduino_DriveBus_Library.h"
+#include "pin_config.h"
+#include <Wire.h>
+#include "HWCDC.h"
+
+HWCDC USBSerial;
+
+#define SCREEN_W 368
+#define SCREEN_H 448
+
+// Face canvas band: spans full width and exactly covers the eye animation range
+#define FACE_Y 135
+#define FACE_W SCREEN_W
+#define FACE_H 165
+
+#define C_BLACK       0x0000
+#define C_WHITE       0xFFFF
+#define C_EYE_BLUE    0x07FF 
+#define C_HEART_RED   0xF800
+
+Arduino_DataBus *bus = new Arduino_ESP32QSPI(
+  LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
+
+Arduino_CO5300 *gfx = new Arduino_CO5300(
+    bus, GFX_NOT_DEFINED, 0, LCD_WIDTH, LCD_HEIGHT, 16, 0, 0, 0);
+
+// Off-screen canvas buffer locked at (0, FACE_Y)
+Arduino_Canvas *canvas = new Arduino_Canvas(FACE_W, FACE_H, gfx, 0, FACE_Y);
+
+struct EyeState {
+  float leftX, leftY;
+  float rightX, rightY;
+  float width, height;
+  float cornerRadius;
+  float blinkAmount;
+};
+
+EyeState currentEyes = {105, 220, 243, 220, 90, 110, 35, 0.0f};
+EyeState targetEyes  = {105, 220, 243, 220, 90, 110, 35, 0.0f};
+
+int currentExp = 0;
+uint32_t lastActionTime = 0;
+uint32_t nextInterval = 3000;
+bool isBlinking = false;
+uint32_t blinkTimer = 0;
+bool canvasReady = false;
+
+void applyExpression(int exp) {
+  switch (exp) {
+    case 0: targetEyes = {105, 220, 243, 220, 90, 110, 35, 0.0f}; break; // Normal
+    case 1: targetEyes = {105, 230, 243, 230, 100, 70, 20, 0.0f}; break; // Happy
+    case 2: targetEyes = {105, 220, 243, 220, 110, 130, 45, 0.0f}; break; // Surprised
+    case 3: targetEyes = {105, 225, 243, 225, 95, 60, 15, 0.0f}; break; // Suspicious
+    case 4: targetEyes = {105, 235, 243, 235, 95, 30, 10, 0.0f}; break; // Sleepy
+    case 5: targetEyes = {85, 220, 223, 220, 90, 110, 35, 0.0f}; break; // Look Left
+    case 6: targetEyes = {125, 220, 263, 220, 90, 110, 35, 0.0f}; break; // Look Right
+    case 7: targetEyes = {105, 195, 243, 195, 90, 110, 35, 0.0f}; break; // Look Up
+    case 8: targetEyes = {105, 220, 243, 220, 90, 110, 35, 0.0f}; break; // Wink
+    case 9: targetEyes = {105, 220, 243, 220, 90, 110, 35, 0.0f}; break; // Heart
+  }
+}
+
+void renderEyes() {
+  float lH = currentEyes.height * (1.0f - currentEyes.blinkAmount);
+  float rH = currentEyes.height * (1.0f - currentEyes.blinkAmount);
+  if (lH < 6) lH = 6;
+  if (rH < 6) rH = 6;
+
+  int lx = (int)currentEyes.leftX;
+  int ly = (int)currentEyes.leftY - FACE_Y; // Convert to canvas local Y
+  int rx = (int)currentEyes.rightX;
+  int ry = (int)currentEyes.rightY - FACE_Y; // Convert to canvas local Y
+  int w  = (int)currentEyes.width;
+  int r  = (int)currentEyes.cornerRadius;
+
+  if (canvasReady) {
+    // 1. Clear off-screen buffer in RAM (instant, zero screen flicker)
+    canvas->fillScreen(C_BLACK);
+
+    // 2. Draw Left Eye
+    canvas->fillRoundRect(lx - w / 2, ly - (int)lH / 2, w, (int)lH, r, C_EYE_BLUE);
+
+    // 3. Draw Right Eye
+    if (currentExp == 8) {
+      canvas->fillRect(rx - w / 2, ry - 6, w, 12, C_EYE_BLUE); // Wink slot
+    } else {
+      canvas->fillRoundRect(rx - w / 2, ry - (int)rH / 2, w, (int)rH, r, C_EYE_BLUE);
+    }
+
+    // 4. Draw Heart accessory if expression 9
+    if (currentExp == 9) {
+      int hx = rx + 40;
+      int hy = ry - 20;
+      canvas->fillCircle(hx - 6, hy, 10, C_HEART_RED);
+      canvas->fillCircle(hx + 6, hy, 10, C_HEART_RED);
+      canvas->fillTriangle(hx - 18, hy + 2, hx + 18, hy + 2, hx, hy + 22, C_HEART_RED);
+    }
+
+    // 5. Transfer to AMOLED in one continuous QSPI blast
+    canvas->flush();
+  }
+}
+
+void setup() {
+  USBSerial.begin(115200);
+  delay(500);
+
+  gfx->begin();
+  gfx->fillScreen(C_BLACK);
+  gfx->setBrightness(255);
+  randomSeed(analogRead(0));
+
+  // Initialize the canvas buffer in memory
+  if (canvas->begin(GFX_SKIP_OUTPUT_BEGIN)) {
+    canvasReady = true;
+    USBSerial.println("Face canvas initialized successfully.");
+  } else {
+    USBSerial.println("Canvas allocation failed! Check PSRAM settings.");
+  }
+
+  applyExpression(0);
+  renderEyes();
+}
+
+void loop() {
+  uint32_t now = millis();
+
+  float easing = 0.15f;
+  
+  float diff = abs(targetEyes.leftX - currentEyes.leftX) + 
+               abs(targetEyes.leftY - currentEyes.leftY) +
+               abs(targetEyes.width - currentEyes.width) +
+               abs(targetEyes.height - currentEyes.height) +
+               abs(targetEyes.cornerRadius - currentEyes.cornerRadius) +
+               abs(targetEyes.blinkAmount - currentEyes.blinkAmount);
+
+  if (diff > 0.05f) {
+    currentEyes.leftX += (targetEyes.leftX - currentEyes.leftX) * easing;
+    currentEyes.leftY += (targetEyes.leftY - currentEyes.leftY) * easing;
+    currentEyes.rightX += (targetEyes.rightX - currentEyes.rightX) * easing;
+    currentEyes.rightY += (targetEyes.rightY - currentEyes.rightY) * easing;
+    currentEyes.width += (targetEyes.width - currentEyes.width) * easing;
+    currentEyes.height += (targetEyes.height - currentEyes.height) * easing;
+    currentEyes.cornerRadius += (targetEyes.cornerRadius - currentEyes.cornerRadius) * easing;
+    currentEyes.blinkAmount += (targetEyes.blinkAmount - currentEyes.blinkAmount) * easing;
+
+    renderEyes();
+    delay(20);
+  } else if (diff > 0.001f) {
+    currentEyes = targetEyes;
+    renderEyes();
+    delay(20);
+  } else {
+    delay(30);
+  }
+
+  // Blinking logic
+  if (!isBlinking && random(0, 70) == 1) {
+    isBlinking = true;
+    targetEyes.blinkAmount = 0.95f;
+    blinkTimer = now + 120;
+  }
+  if (isBlinking && now >= blinkTimer) {
+    isBlinking = false;
+    targetEyes.blinkAmount = 0.0f;
+  }
+
+  // Expression cycling
+  if (now - lastActionTime >= nextInterval) {
+    lastActionTime = now;
+    nextInterval = random(3000, 6000);
+    currentExp = random(0, 10);
+    applyExpression(currentExp);
+  }
+}
