@@ -1,0 +1,92 @@
+#include <Arduino.h>
+#include "Arduino_GFX_Library.h"
+#include "Arduino_DriveBus_Library.h"
+#include "pin_config.h"
+#include "RtcDrv.hpp"
+#include <Wire.h>
+
+#include "HWCDC.h"
+HWCDC USBSerial;
+
+SensorPCF85063 rtc;
+uint32_t lastMillis;
+char previousTimeString[10] = "";
+char previousDateString[15] = "";
+
+Arduino_DataBus *bus = new Arduino_ESP32QSPI(
+  LCD_CS /* CS */, LCD_SCLK /* SCK */, LCD_SDIO0 /* SDIO0 */, LCD_SDIO1 /* SDIO1 */,
+  LCD_SDIO2 /* SDIO2 */, LCD_SDIO3 /* SDIO3 */);
+
+Arduino_CO5300 *gfx = new Arduino_CO5300(
+    bus, GFX_NOT_DEFINED /* RST */, 0 /* rotation */, LCD_WIDTH /* width */, LCD_HEIGHT /* height */, 16, 0, 0, 0);
+
+int16_t getCenterCoord(const char *text, uint8_t textSize) {
+  int16_t textWidth = strlen(text) * 6 * textSize;  
+  return (LCD_WIDTH - textWidth) / 2;
+}
+
+void setup() {
+  USBSerial.begin(115200);
+  if (!rtc.begin(Wire, IIC_SDA, IIC_SCL)) {
+    USBSerial.println("Failed to find PCF8563 - check your wiring!");
+    while (1) {
+      delay(1000);
+    }
+  }
+
+  // Uncomment if you need to set initial time
+  /*
+  uint16_t year = 2026;
+  uint8_t month = 10;
+  uint8_t day = 1;
+  uint8_t hour = 11;
+  uint8_t minute = 56;
+  uint8_t second = 0;
+  rtc.setDateTime(year, month, day, hour, minute, second);
+  */
+
+  gfx->begin();
+  gfx->fillScreen(0x0000);  
+  gfx->setBrightness(255);
+}
+
+void loop() {
+  if (millis() - lastMillis >= 1000) {
+    lastMillis = millis();
+
+    RTC_DateTime datetime = rtc.getDateTime();
+
+    char timeString[10];
+    char dateString[15];
+
+    sprintf(timeString, "%02d:%02d:%02d",
+            datetime.getHour(), datetime.getMinute(), datetime.getSecond());
+            
+    sprintf(dateString, "%04d-%02d-%02d",
+            datetime.getYear(), datetime.getMonth(), datetime.getDay());
+
+    if (strcmp(timeString, previousTimeString) != 0) {
+      gfx->fillRect(0, 160, LCD_WIDTH, 50, 0x0000);  
+      gfx->setTextColor(RGB565_WHITE);               
+      gfx->setTextSize(4, 4, 0);                     
+
+      int16_t timeX = getCenterCoord(timeString, 4);
+      gfx->setCursor(timeX, 160);
+      gfx->print(timeString);
+
+      strcpy(previousTimeString, timeString);
+    }
+
+    if (strcmp(dateString, previousDateString) != 0) {
+      gfx->fillRect(0, 120, LCD_WIDTH, 30, 0x0000);  
+      gfx->setTextColor(0x7BEF);                     
+      gfx->setTextSize(2, 2, 0);                     
+
+      int16_t dateX = getCenterCoord(dateString, 2);
+      gfx->setCursor(dateX, 120);
+      gfx->print(dateString);
+
+      strcpy(previousDateString, dateString);
+    }
+  }
+}
