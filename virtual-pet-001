@@ -1,318 +1,964 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include "Arduino_GFX_Library.h"
 #include "Arduino_DriveBus_Library.h"
 #include "pin_config.h"
 #include "RtcDrv.hpp"
 #include <Wire.h>
-
 #include "HWCDC.h"
+
 HWCDC USBSerial;
-
 SensorPCF85063 rtc;
-uint32_t lastMillis;
-uint32_t lastAnimMillis;
-uint32_t lastHungerMillis;
+Preferences prefs;
 
-int animState = 0; // 0: Normal, 1: Blink, 2: Yawn, 3: Smile, 4: Walk Left, 5: Walk Right
-int petOffsetX = 0; 
-int happiness = 8;  // Out of 10 blocks
-char previousMoodString[20] = "";
+#define SCREEN_W 368
+#define SCREEN_H 448
+
+// --- Audio Pin Configuration ---
+// Set to your buzzer GPIO pin (e.g. 1 or 2). Connect (+) to GPIO, (-) to GND.
+// Set to -1 if no buzzer is connected.
+#define BUZZER_PIN 1
+
+// AXP2101 PMIC I2C Address
+#define AXP2101_ADDR 0x34
+
+// --- 16-Bit Retro Color Palette (RGB565) ---
+#define C_BLACK        0x0000
+#define C_WHITE        0xFFFF
+#define C_WALL_TOP     0x2945 // Deep Retro Slate
+#define C_WALL_STRIPE  0x31E7 // Subtle Wall Pinstripe
+#define C_WOOD_DARK    0x4A63 // Dark Mahogany Wainscot
+#define C_WOOD_LIGHT   0x7388 // Light Wood Trim
+#define C_FLOOR_A      0x9467 // Retro Parquet Floor Tan
+#define C_FLOOR_B      0x83E5 // Darker Parquet Tile
+#define C_RUG_OUTER    0xB1E5 // Burgundy Rug Border
+#define C_RUG_INNER    0xEAA9 // Warm Gold Rug Center
+#define C_WIN_SKY_DAY  0x55FF // Bright Sky Blue
+#define C_WIN_SKY_NIGHT 0x08A7 // Midnight Navy
+#define C_WIN_SUN      0xFFE0 // Golden Sun / Day Counter Gold
+#define C_WIN_FRAME    0x5244 // Oak Window Frame
+#define C_UI_BG        0x10A2 // Deep Indigo RPG Box
+#define C_UI_BORDER_LT 0xDFBF // Bevel Highlight
+#define C_UI_BORDER_DK 0x0841 // Bevel Shadow
+#define C_DANGER_RED   0xF800
+#define C_BAT_GREEN    0x3E88
+#define C_BAT_YELLOW   0xFDE0
+
+// Pet Palette
+const uint16_t petPalette[12] = {
+  0x0000, 0x18C3, 0xFDC0, 0xC320, 0xFFF4, 0xFFFF, 
+  0xD675, 0xFBAE, 0x0821, 0xE8A4, 0x4D79, 0x28E3
+};
 
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
-  LCD_CS /* CS */, LCD_SCLK /* SCK */, LCD_SDIO0 /* SDIO0 */, LCD_SDIO1 /* SDIO1 */,
-  LCD_SDIO2 /* SDIO2 */, LCD_SDIO3 /* SDIO3 */);
+  LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
 
 Arduino_CO5300 *gfx = new Arduino_CO5300(
-    bus, GFX_NOT_DEFINED /* RST */, 0 /* rotation */, LCD_WIDTH /* width */, LCD_HEIGHT /* height */, 16, 0, 0, 0);
+    bus, GFX_NOT_DEFINED, 0, LCD_WIDTH, LCD_HEIGHT, 16, 0, 0, 0);
 
-// Frame 0: Normal Face
-const uint8_t petNormal[24][24] = {
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1},
-  {1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0},
-  {0,0,1,1,0,0,1,1,1,0,0,0,0,0,1,1,1,0,0,1,1,0,0,0},
-  {0,1,1,0,0,0,0,1,1,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+// --- 32x32 16-Bit Indexed Sprite Frames (Scaled 4x to 128x128) ---
+#define SPRITE_SIZE 32
+#define SPRITE_SCALE 4
+#define PET_X 120
+#define PET_Y 190
+
+// 1. Idle Frame A
+const uint8_t spriteIdleA[32][32] PROGMEM = {
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0},
+  {0,0,0,0,1,2,2,11,1,0,0,0,0,0,0,0,0,0,0,0,0,1,11,2,2,1,0,0,0,0,0,0},
+  {0,0,0,1,2,4,2,11,1,0,0,0,0,0,0,0,0,0,0,0,0,1,11,2,4,2,1,0,0,0,0,0},
+  {0,0,0,1,2,2,11,11,1,0,0,0,0,0,0,0,0,0,0,0,0,1,11,11,2,2,1,0,0,0,0,0},
+  {0,0,1,2,2,11,11,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,11,11,2,2,1,0,0,0,0},
+  {0,0,1,2,11,11,1,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,1,11,11,2,1,0,0,0,0},
+  {0,0,1,1,1,1,1,0,0,1,2,2,4,4,4,4,4,4,2,2,1,0,0,1,1,1,1,1,0,0,0,0},
+  {0,0,0,0,0,0,0,1,2,2,4,4,4,4,4,4,4,4,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,1,1,2,2,4,4,4,4,4,4,4,4,4,4,2,2,1,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,1,2,2,2,2,4,4,2,2,2,2,2,2,4,4,2,2,2,2,1,0,0,0,0,0,0,0,0},
+  {0,0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0},
+  {0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0},
+  {0,0,1,2,2,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,2,2,1,0,0,0,0,0,0},
+  {0,1,2,2,1,8,8,1,2,2,2,2,2,2,2,2,2,2,2,2,1,8,8,1,2,2,1,0,0,0,0,0},
+  {0,1,2,2,1,5,8,1,2,2,2,2,2,1,1,2,2,2,2,2,1,5,8,1,2,2,1,0,0,0,0,0},
+  {0,1,2,7,1,8,8,1,7,2,2,2,1,9,9,1,2,2,2,7,1,8,8,1,7,2,1,0,0,0,0,0},
+  {0,1,2,7,7,1,1,7,7,2,2,1,9,9,9,9,1,2,2,7,7,1,1,7,7,2,1,0,0,0,0,0},
+  {0,0,1,2,7,7,7,2,2,2,2,1,9,9,9,9,1,2,2,2,2,7,7,7,2,1,0,0,0,0,0,0},
+  {0,0,1,2,2,2,2,2,2,2,2,2,1,1,1,1,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0},
+  {0,0,0,1,1,2,2,2,2,2,5,5,5,5,5,5,5,5,2,2,2,2,2,1,1,0,0,0,0,0,0,0},
+  {0,0,1,2,2,1,1,2,2,5,5,5,5,5,5,5,5,5,5,2,2,1,1,2,2,1,0,0,0,0,0,0},
+  {0,1,2,2,2,2,2,1,2,5,5,5,5,5,5,5,5,5,5,2,1,2,2,2,2,2,1,0,0,0,0,0},
+  {0,1,2,2,2,2,2,1,2,5,5,5,5,5,5,5,5,5,5,2,1,2,2,2,2,2,1,0,0,0,0,0},
+  {0,1,3,2,2,2,3,1,3,6,5,5,5,5,5,5,5,5,6,3,1,3,2,2,2,3,1,0,0,0,0,0},
+  {0,0,1,3,3,3,1,0,1,3,6,6,6,6,6,6,6,6,3,1,0,1,3,3,3,1,0,0,0,0,0,0},
+  {0,0,0,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,1,2,2,1,0,0,0,0,1,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
-// Frame 1: Blink
-const uint8_t petBlink[24][24] = {
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0},
-  {0,0,1,1,0,0,1,1,1,0,0,0,0,0,1,1,1,0,0,1,1,0,0,0},
-  {0,1,1,0,0,0,0,1,1,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+// 2. Idle Frame B
+const uint8_t spriteIdleB[32][32] PROGMEM = {
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0},
+  {0,0,0,1,2,2,11,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,11,2,2,1,0,0,0,0,0},
+  {0,0,1,2,4,2,11,1,0,0,0,1,1,1,1,1,1,1,1,1,0,0,1,11,2,4,2,1,0,0,0,0},
+  {0,0,1,2,11,11,1,0,0,1,2,2,4,4,4,4,4,4,2,2,1,0,0,1,11,11,2,1,0,0,0,0},
+  {0,0,1,1,1,1,0,0,1,2,2,4,4,4,4,4,4,4,4,2,2,1,0,0,1,1,1,1,0,0,0,0},
+  {0,0,0,0,0,0,0,1,2,2,4,4,4,4,4,4,4,4,4,4,2,2,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,1,1,2,2,4,4,2,2,2,2,2,2,4,4,2,2,2,2,1,1,0,0,0,0,0,0,0},
+  {0,0,0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0},
+  {0,0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0},
+  {0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0},
+  {0,0,1,2,2,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,2,2,2,2,1,0,0,0,0},
+  {0,1,2,2,1,8,8,1,2,2,2,2,2,2,2,2,2,2,2,2,1,8,8,1,2,2,2,1,0,0,0,0},
+  {0,1,2,2,1,5,8,1,2,2,2,2,2,1,1,2,2,2,2,2,1,5,8,1,2,2,2,1,0,0,0,0},
+  {0,1,2,7,1,8,8,1,7,2,2,2,1,9,9,1,2,2,2,7,1,8,8,1,7,2,2,1,0,0,0,0},
+  {0,1,2,7,7,1,1,7,7,2,2,1,9,9,9,9,1,2,2,7,7,1,1,7,7,2,2,1,0,0,0,0},
+  {0,0,1,2,7,7,7,2,2,2,2,1,9,9,9,9,1,2,2,2,2,7,7,7,2,2,1,0,0,0,0,0},
+  {0,0,1,2,2,2,2,2,2,2,2,2,1,1,1,1,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0},
+  {0,0,0,1,1,2,2,2,2,2,5,5,5,5,5,5,5,5,2,2,2,2,2,2,1,1,0,0,0,0,0,0},
+  {0,0,1,2,2,1,1,2,2,5,5,5,5,5,5,5,5,5,5,2,2,1,1,2,2,2,1,0,0,0,0,0},
+  {0,1,2,2,2,2,2,1,2,5,5,5,5,5,5,5,5,5,5,2,1,2,2,2,2,2,2,1,0,0,0,0},
+  {0,1,2,2,2,2,2,1,2,5,5,5,5,5,5,5,5,5,5,2,1,2,2,2,2,2,2,1,0,0,0,0},
+  {0,1,3,2,2,2,3,1,3,6,5,5,5,5,5,5,5,5,6,3,1,3,2,2,2,2,3,1,0,0,0,0},
+  {0,0,1,3,3,3,1,0,1,3,6,6,6,6,6,6,6,6,3,1,0,1,3,3,3,3,1,0,0,0,0,0},
+  {0,0,0,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,1,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,1,2,2,2,2,1,0,0,0,0,1,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
-// Frame 2: Yawn
-const uint8_t petYawn[24][24] = {
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1},
-  {1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,0,1,1,0,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,0,1,1,0,1,1,1,1,1,1,1,1,1,1},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0},
-  {0,0,1,1,0,0,1,1,1,0,0,0,0,0,1,1,1,0,0,1,1,0,0,0},
-  {0,1,1,0,0,0,0,1,1,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+// 3. Happy Frame
+const uint8_t spriteHappy[32][32] PROGMEM = {
+  {0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0},
+  {0,0,0,0,1,2,2,11,1,0,0,0,0,0,0,0,0,0,0,0,0,1,11,2,2,1,0,0,0,0,0,0},
+  {0,0,0,1,2,4,2,11,1,0,0,0,0,0,0,0,0,0,0,0,0,1,11,2,4,2,1,0,0,0,0,0},
+  {0,0,0,1,2,2,11,11,1,0,0,1,1,1,1,1,1,1,1,0,0,1,11,11,2,2,1,0,0,0,0,0},
+  {0,0,1,2,2,11,11,1,0,1,2,2,4,4,4,4,4,2,2,1,0,1,11,11,2,2,1,0,0,0,0},
+  {0,0,1,2,11,11,1,0,1,2,4,4,4,4,4,4,4,4,2,1,0,0,1,11,11,2,1,0,0,0,0},
+  {0,0,1,1,1,1,1,0,1,2,4,4,4,4,4,4,4,4,4,2,1,0,1,1,1,1,1,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,2,2,4,4,2,2,2,2,4,4,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0},
+  {0,0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0},
+  {0,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,0,0,0,0,0},
+  {1,2,2,1,2,2,1,1,2,2,2,2,2,2,2,2,2,2,2,2,1,1,2,2,1,2,2,1,0,0,0,0},
+  {1,2,2,1,2,1,0,0,1,2,2,2,2,2,2,2,2,2,2,1,0,0,1,2,1,2,2,1,0,0,0,0},
+  {1,2,2,1,7,1,0,0,1,7,2,2,1,1,1,1,2,2,7,1,0,0,1,7,1,2,2,1,0,0,0,0},
+  {0,1,1,2,7,7,1,1,7,7,2,1,9,9,9,9,1,2,7,7,1,1,7,7,2,1,1,0,0,0,0,0},
+  {0,0,1,2,7,7,7,7,7,2,1,9,9,9,9,9,9,1,2,7,7,7,7,7,2,1,0,0,0,0,0,0},
+  {0,0,1,2,2,2,7,2,2,2,1,9,5,5,5,5,9,1,2,2,2,7,2,2,2,1,0,0,0,0,0,0},
+  {0,0,0,1,1,2,2,2,2,2,1,9,9,9,9,9,9,1,2,2,2,2,2,1,1,0,0,0,0,0,0,0},
+  {0,0,1,2,2,1,1,2,2,2,2,1,1,1,1,1,1,2,2,2,2,1,1,2,2,1,0,0,0,0,0,0},
+  {0,1,2,2,2,2,2,1,2,5,5,5,5,5,5,5,5,5,5,2,1,2,2,2,2,2,1,0,0,0,0,0},
+  {0,1,2,2,2,2,2,1,2,5,5,5,5,5,5,5,5,5,5,2,1,2,2,2,2,2,1,0,0,0,0,0},
+  {0,1,3,2,2,2,3,1,3,6,5,5,5,5,5,5,5,5,6,3,1,3,2,2,2,3,1,0,0,0,0,0},
+  {0,0,1,3,3,3,1,0,1,3,6,6,6,6,6,6,6,6,3,1,0,1,3,3,3,1,0,0,0,0,0,0},
+  {0,0,0,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,1,2,2,1,0,0,0,0,1,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
-// Frame 3: Smile
-const uint8_t petSmile[24][24] = {
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0},
-  {0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,1,1,1},
-  {1,1,1,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,1,1,1,1,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0},
-  {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
-  {0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0},
-  {0,0,1,1,0,0,1,1,1,0,0,0,0,0,1,1,1,0,0,1,1,0,0,0},
-  {0,1,1,0,0,0,0,1,1,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+// 4. Sleeping Frame
+const uint8_t spriteSleep[32][32] PROGMEM = {
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,10,10,10,10,10,10,10,10,10,1,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,1,10,10,10,10,10,10,10,10,10,10,10,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,1,2,2,4,4,4,4,4,4,4,4,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,1,2,2,4,4,4,4,4,4,4,4,4,4,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0},
+  {0,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0},
+  {0,1,2,2,1,1,1,2,2,2,2,2,2,2,1,1,1,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0},
+  {1,2,2,1,0,0,0,1,2,2,2,2,2,1,0,0,0,1,2,2,2,2,2,1,0,0,0,0,0,0,0,0},
+  {1,2,7,1,0,0,0,1,7,2,2,2,2,1,0,0,0,1,7,2,2,2,2,1,0,0,0,0,0,0,0,0},
+  {1,2,7,7,1,1,1,7,7,2,2,2,2,2,1,1,1,7,7,2,2,2,2,1,0,0,0,0,0,0,0,0},
+  {0,1,2,7,7,7,7,2,2,2,1,1,2,2,7,7,7,7,2,2,2,2,1,0,0,0,0,0,0,0,0,0},
+  {0,1,2,2,2,2,2,2,2,1,9,9,1,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0},
+  {0,0,1,2,2,2,2,2,2,2,1,1,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,1,1,2,2,2,5,5,5,5,5,5,5,2,2,2,2,1,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,1,2,2,1,2,5,5,5,5,5,5,5,5,5,2,1,2,2,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,1,2,2,2,2,1,5,5,5,5,5,5,5,5,5,1,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0},
+  {0,1,3,2,2,3,1,3,6,6,6,6,6,6,6,3,1,3,2,2,3,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,1,3,3,3,1,1,1,1,1,1,1,1,1,1,1,1,3,3,3,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
-void drawPet(int state, int offsetX) {
-  int scale = 7; 
-  int petWidth = 24 * scale;
-  int petHeight = 24 * scale;
-  int baseScreenX = (LCD_WIDTH - petWidth) / 2;
-  int petX = baseScreenX + offsetX;
-  int petY = 50;
+// 5. Retro Angel Ghost (Death State)
+const uint8_t spriteGhost[32][32] PROGMEM = {
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,8,8,5,5,5,5,8,8,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,7,5,5,5,5,5,5,5,5,7,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,5,5,5,1,1,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,1,5,5,5,5,5,5,5,5,1,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,1,1,1,5,5,5,5,5,5,1,1,0,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,1,5,5,1,5,5,1,5,5,1,5,5,1,5,1,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,1,10,1,5,1,10,1,5,1,10,1,5,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,1,1,0,1,1,0,1,1,0,1,1,0,1,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+};
 
-  gfx->fillRect(0, 45, LCD_WIDTH, 175, 0x0000);
+// --- Pet State Management ---
+enum PetState {
+  STATE_IDLE,
+  STATE_HAPPY,
+  STATE_SLEEP,
+  STATE_DEAD
+};
 
-  const uint8_t (*activeSprite)[24];
-  if (state == 1) activeSprite = petBlink;
-  else if (state == 2) activeSprite = petYawn;
-  else if (state == 3) activeSprite = petSmile;
-  else activeSprite = petNormal;
+PetState currentState = STATE_IDLE;
+uint8_t currentAnimFrame = 0;
+uint32_t lastAnimTick = 0;
+uint32_t lastStatTick = 0;
+uint32_t lastTouchTick = 0;
+uint32_t lastClockTick = 0;
+uint32_t lastSaveTick = 0;
+uint32_t lastDayCheckTick = 0;
+uint32_t moodResetTick = 0;
 
-  for (int row = 0; row < 24; row++) {
-    for (int col = 0; col < 24; col++) {
-      if (activeSprite[row][col] == 1) {
-        gfx->fillRect(petX + (col * scale), petY + (row * scale), scale, scale, RGB565_WHITE);
-      }
-    }
-  }
+uint32_t awakeStartTime = 0;
+uint32_t starveStartTime = 0;
+const uint32_t AUTO_SLEEP_TIMEOUT_MS = 4 * 3600 * 1000UL;
+const uint32_t STARVE_GRACE_MS       = 2 * 3600 * 1000UL;
+
+uint8_t lastRecordedDay = 0;
+uint32_t daysAlive = 1;
+
+float hunger = 85.0f;
+float happiness = 90.0f;
+float energy = 75.0f;
+
+uint8_t batteryPercent = 100;
+bool isCharging = false;
+
+// --- Chiptune Audio Synthesizer ---
+void playTone(uint16_t freq, uint16_t durationMs) {
+  #if BUZZER_PIN >= 0
+    tone(BUZZER_PIN, freq, durationMs);
+    delay(durationMs);
+    noTone(BUZZER_PIN);
+  #endif
 }
 
-void drawUIElements(bool buttonPressed = false) {
-  // Happiness Bar Header
-  gfx->fillRect(0, 10, LCD_WIDTH, 25, 0x0000);
-  gfx->setTextSize(1, 1, 0);
-  gfx->setTextColor(RGB565_WHITE);
-  gfx->setCursor(35, 15);
-  gfx->print("HAPPINESS:");
+void soundFeed() {
+  playTone(1046, 70); // C6
+  delay(15);
+  playTone(1318, 90); // E6
+}
 
-  int startX = 115;
-  for (int i = 0; i < 10; i++) {
-    if (i < happiness) {
-      gfx->fillRect(startX + (i * 9), 13, 7, 10, RGB565_WHITE);
+void soundPlay() {
+  playTone(1046, 50); // C6
+  delay(10);
+  playTone(1318, 50); // E6
+  delay(10);
+  playTone(1568, 110); // G6
+}
+
+void soundSleep() {
+  playTone(784, 90);  // G5
+  delay(20);
+  playTone(523, 140); // C5
+}
+
+void soundStarveAlarm() {
+  playTone(2093, 70); // High warning C7
+  delay(30);
+  playTone(2093, 70);
+}
+
+void soundRevive() {
+  playTone(523, 70);  // C5
+  delay(15);
+  playTone(659, 70);  // E5
+  delay(15);
+  playTone(784, 70);  // G5
+  delay(15);
+  playTone(1046, 180);// C6
+}
+
+// --- RTC Auto-Calibrator from Upload Timestamp ---
+void calibrateRtcFromBuildTime() {
+  const char* dateStr = __DATE__; // "Mmm dd yyyy"
+  const char* timeStr = __TIME__; // "hh:mm:ss"
+
+  char monthName[4];
+  int day = 1, year = 2026, hour = 12, min = 0, sec = 0;
+
+  sscanf(dateStr, "%3s %d %d", monthName, &day, &year);
+  sscanf(timeStr, "%d:%d:%d", &hour, &min, &sec);
+
+  const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  int month = 1;
+  for (int i = 0; i < 12; i++) {
+    if (strncmp(monthName, months[i], 3) == 0) {
+      month = i + 1;
+      break;
+    }
+  }
+
+  rtc.setDateTime(year, month, day, hour, min, sec);
+}
+
+void drawTopHUD(bool fullRedraw);
+void drawBottomDock(int8_t activeBtn = -1);
+void drawPetSprite(const uint8_t sprite[32][32]);
+void erasePetRegion();
+void savePetData();
+void loadPetData();
+void readBatteryPMIC();
+
+void drawBevelBox(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t fill, bool pressed = false) {
+  gfx->fillRect(x, y, w, h, fill);
+  uint16_t topCol = pressed ? C_UI_BORDER_DK : C_UI_BORDER_LT;
+  uint16_t botCol = pressed ? C_UI_BORDER_LT : C_UI_BORDER_DK;
+  gfx->drawFastHLine(x, y, w, topCol);
+  gfx->drawFastVLine(x, y, h, topCol);
+  gfx->drawFastHLine(x, y + h - 1, w, botCol);
+  gfx->drawFastVLine(x + w - 1, y, h, botCol);
+}
+
+void drawSegmentedBar(int16_t x, int16_t y, int16_t w, int16_t h, float value, uint16_t barColor) {
+  drawBevelBox(x, y, w, h, C_BLACK, true);
+  int segments = 8;
+  int segW = (w - 4 - (segments - 1) * 2) / segments;
+  int activeSegs = (int)((value / 100.0f) * segments + 0.5f);
+
+  for (int i = 0; i < segments; i++) {
+    int sx = x + 2 + i * (segW + 2);
+    if (i < activeSegs) {
+      gfx->fillRect(sx, y + 2, segW, h - 4, barColor);
+      gfx->drawFastHLine(sx, y + 2, segW, C_WHITE);
     } else {
-      gfx->drawRect(startX + (i * 9), 13, 7, 10, RGB565_WHITE);
+      gfx->fillRect(sx, y + 2, segW, h - 4, 0x18E3);
+    }
+  }
+}
+
+void drawBatteryIcon(int16_t x, int16_t y, uint8_t pct, bool charging) {
+  gfx->fillRect(x, y, 26, 14, C_BLACK);
+  gfx->drawRect(x, y, 23, 14, C_UI_BORDER_LT);
+  gfx->drawFastVLine(x + 23, y + 4, 6, C_UI_BORDER_LT);
+  gfx->drawFastVLine(x + 24, y + 4, 6, C_UI_BORDER_LT);
+
+  int fillW = (pct * 19) / 100;
+  if (fillW > 19) fillW = 19;
+
+  uint16_t col = C_BAT_GREEN;
+  if (pct <= 20) col = C_DANGER_RED;
+  else if (pct <= 50) col = C_BAT_YELLOW;
+
+  if (fillW > 0) {
+    gfx->fillRect(x + 2, y + 2, fillW, 10, col);
+  }
+
+  if (charging) {
+    gfx->setTextColor(C_WIN_SUN);
+    gfx->setTextSize(1);
+    gfx->setCursor(x + 7, y + 3);
+    gfx->print("+");
+  }
+}
+
+void readBatteryPMIC() {
+  Wire.beginTransmission(AXP2101_ADDR);
+  Wire.write(0x00);
+  if (Wire.endTransmission() == 0) {
+    if (Wire.requestFrom((uint8_t)AXP2101_ADDR, (uint8_t)1) == 1) {
+      uint8_t reg00 = Wire.read();
+      isCharging = (reg00 & (1 << 5)) != 0;
     }
   }
 
-  // Mood Text
-  char moodStr[25];
-  if (happiness <= 3) {
-    strcpy(moodStr, "MOOD: HUNGRY");
-  } else if (happiness >= 8) {
-    strcpy(moodStr, "MOOD: EXCITED");
-  } else {
-    strcpy(moodStr, "MOOD: CONTENT");
-  }
-
-  if (strcmp(moodStr, previousMoodString) != 0) {
-    gfx->fillRect(0, 225, LCD_WIDTH, 20, 0x0000);
-    gfx->setTextSize(2, 2, 0);
-    int moodWidth = strlen(moodStr) * 6 * 2;
-    gfx->setCursor((LCD_WIDTH - moodWidth) / 2, 225);
-    gfx->print(moodStr);
-    strcpy(previousMoodString, moodStr);
-  }
-
-  // Feed Button Box
-  if (buttonPressed) {
-    gfx->fillRoundRect(40, 260, 160, 45, 10, RGB565_WHITE); // Flash white fill
-    gfx->setTextSize(2, 2, 0);
-    gfx->setTextColor(0x0000); // Black text
-    gfx->setCursor(85, 274);
-    gfx->print("FEED ME");
-  } else {
-    gfx->fillRoundRect(40, 260, 160, 45, 10, 0x0000); // Black fill
-    gfx->drawRoundRect(40, 260, 160, 45, 10, RGB565_WHITE); // White outline
-    gfx->setTextSize(2, 2, 0);
-    gfx->setTextColor(RGB565_WHITE); // White text
-    gfx->setCursor(85, 274);
-    gfx->print("FEED ME");
-  }
-}
-
-// Floating food animation & stats update
-void feedPet() {
-  // 1. Flash the button
-  drawUIElements(true);
-
-  // 2. Animate floating food icon traveling up to the pet
-  int startX = LCD_WIDTH / 2 - 6;
-  int startY = 250;
-  int endY = 140;
-
-  for (int y = startY; y >= endY; y -= 12) {
-    gfx->fillRect(startX, y, 12, 12, RGB565_WHITE);
-    delay(20);
-    gfx->fillRect(startX, y, 12, 12, 0x0000);
-  }
-
-  // 3. Increase happiness and trigger smile
-  if (happiness < 10) {
-    happiness = min(10, happiness + 3);
-  }
-  
-  animState = 3; // Smile!
-  drawPet(animState, 0);
-  drawUIElements(false);
-  delay(300);
-}
-
-// Direct I2C Touch Polling for CST816S / FT3168 Touch Controllers
-bool readTouch(int16_t *x, int16_t *y) {
-  Wire.beginTransmission(0x15); // Standard touch chip I2C address on many ESP32 touch boards
-  Wire.write(0x02);
-  if (Wire.endTransmission(false) == 0) {
-    if (Wire.requestFrom(0x15, 5) >= 5) {
-      uint8_t points = Wire.read();
-      if (points > 0) {
-        uint8_t xH = Wire.read();
-        uint8_t xL = Wire.read();
-        uint8_t yH = Wire.read();
-        uint8_t yL = Wire.read();
-        *x = ((xH & 0x0F) << 8) | xL;
-        *y = ((yH & 0x0F) << 8) | yL;
-        return true;
+  Wire.beginTransmission(AXP2101_ADDR);
+  Wire.write(0xA4);
+  if (Wire.endTransmission() == 0) {
+    if (Wire.requestFrom((uint8_t)AXP2101_ADDR, (uint8_t)1) == 1) {
+      uint8_t raw = Wire.read();
+      if (raw <= 100) {
+        batteryPercent = raw;
       }
     }
   }
-  return false;
+}
+
+void savePetData() {
+  prefs.begin("pockipet", false);
+  prefs.putFloat("hunger", hunger);
+  prefs.putFloat("happiness", happiness);
+  prefs.putFloat("energy", energy);
+  prefs.putUInt("days", daysAlive);
+  prefs.putUChar("state", (uint8_t)currentState);
+  prefs.putUInt("starve", starveStartTime);
+
+  RTC_DateTime dt = rtc.getDateTime();
+  uint8_t hour = min((uint8_t)23, dt.getHour());
+  uint8_t minVal = min((uint8_t)59, dt.getMinute());
+  uint8_t dayVal = max((uint8_t)1, min((uint8_t)31, dt.getDay()));
+
+  uint32_t rtcStamp = ((uint32_t)dayVal * 86400UL) +
+                      ((uint32_t)hour * 3600UL) +
+                      ((uint32_t)minVal * 60UL) +
+                      dt.getSecond();
+  prefs.putUInt("lastRtc", rtcStamp);
+  prefs.end();
+}
+
+void loadPetData() {
+  prefs.begin("pockipet", true);
+  if (prefs.isKey("hunger")) {
+    hunger = prefs.getFloat("hunger", 85.0f);
+    happiness = prefs.getFloat("happiness", 90.0f);
+    energy = prefs.getFloat("energy", 75.0f);
+    daysAlive = prefs.getUInt("days", 1);
+    currentState = (PetState)prefs.getUChar("state", (uint8_t)STATE_IDLE);
+    starveStartTime = prefs.getUInt("starve", 0);
+
+    uint32_t lastRtc = prefs.getUInt("lastRtc", 0);
+    prefs.end();
+
+    if (lastRtc > 0) {
+      RTC_DateTime dt = rtc.getDateTime();
+      uint8_t hour = min((uint8_t)23, dt.getHour());
+      uint8_t minVal = min((uint8_t)59, dt.getMinute());
+      uint8_t dayVal = max((uint8_t)1, min((uint8_t)31, dt.getDay()));
+
+      uint32_t nowRtc = ((uint32_t)dayVal * 86400UL) +
+                        ((uint32_t)hour * 3600UL) +
+                        ((uint32_t)minVal * 60UL) +
+                        dt.getSecond();
+
+      if (nowRtc > lastRtc && (nowRtc - lastRtc) < (86400UL * 30)) { // Safety guard against RTC spikes
+        uint32_t elapsedSec = nowRtc - lastRtc;
+        float decayRate = (currentState == STATE_SLEEP) ? (0.0058f / 5.0f) : (0.0174f / 5.0f);
+        hunger = max(0.0f, hunger - (elapsedSec * decayRate));
+        happiness = max(0.0f, happiness - (elapsedSec * (0.012f / 5.0f)));
+
+        if (currentState == STATE_SLEEP) {
+          energy = min(100.0f, energy + (elapsedSec * (0.35f / 5.0f)));
+        } else {
+          energy = max(0.0f, energy - (elapsedSec * (0.010f / 5.0f)));
+        }
+
+        if (hunger <= 0.0f && elapsedSec >= 7200) {
+          currentState = STATE_DEAD;
+        }
+      }
+    }
+  } else {
+    prefs.end();
+    savePetData();
+  }
+}
+
+void drawRoomBackground() {
+  gfx->fillRect(0, 0, SCREEN_W, 216, C_WALL_TOP);
+  for (int x = 8; x < SCREEN_W; x += 16) {
+    gfx->drawFastVLine(x, 0, 216, C_WALL_STRIPE);
+  }
+
+  gfx->fillRect(0, 216, SCREEN_W, 8, C_WOOD_LIGHT);
+  gfx->fillRect(0, 224, SCREEN_W, 20, C_WOOD_DARK);
+  gfx->drawFastHLine(0, 216, SCREEN_W, C_UI_BORDER_LT);
+  gfx->drawFastHLine(0, 244, SCREEN_W, C_BLACK);
+
+  for (int y = 244; y < SCREEN_H; y += 18) {
+    for (int x = 0; x < SCREEN_W; x += 36) {
+      bool alt = ((x / 36) + (y / 18)) % 2 == 0;
+      gfx->fillRect(x, y, 36, 18, alt ? C_FLOOR_A : C_FLOOR_B);
+      gfx->drawRect(x, y, 36, 18, C_WOOD_DARK);
+    }
+  }
+
+  int cx = SCREEN_W / 2;
+  int cy = 290;
+  gfx->fillEllipse(cx, cy, 110, 48, C_RUG_OUTER);
+  gfx->fillEllipse(cx, cy, 95, 38, C_RUG_INNER);
+  gfx->drawEllipse(cx, cy, 110, 48, C_WOOD_DARK);
+
+  RTC_DateTime dt = rtc.getDateTime();
+  uint8_t hour = min((uint8_t)23, dt.getHour());
+  bool isNight = (hour >= 20 || hour < 7);
+
+  int winX = 26;
+  int winY = 28;
+  int winW = 68;
+  int winH = 82;
+
+  drawBevelBox(winX, winY, winW, winH, C_WIN_FRAME, false);
+  uint16_t skyColor = isNight ? C_WIN_SKY_NIGHT : C_WIN_SKY_DAY;
+  gfx->fillRect(winX + 4, winY + 4, winW - 8, winH - 8, skyColor);
+
+  if (!isNight) {
+    gfx->fillCircle(winX + 22, winY + 24, 10, C_WIN_SUN);
+  } else {
+    gfx->fillCircle(winX + 22, winY + 24, 9, C_WHITE);
+    gfx->fillCircle(winX + 26, winY + 22, 8, C_WIN_SKY_NIGHT);
+    gfx->drawPixel(winX + 44, winY + 18, C_WHITE);
+    gfx->drawPixel(winX + 52, winY + 34, C_WHITE);
+    gfx->drawPixel(winX + 38, winY + 46, C_WHITE);
+  }
+  gfx->drawFastVLine(winX + winW / 2, winY + 4, winH - 8, C_WIN_FRAME);
+  gfx->drawFastHLine(winX + 4, winY + winH / 2, winW - 8, C_WIN_FRAME);
+}
+
+// --- Bold & Legible Top HUD (Text Size 2) ---
+void drawTopHUD(bool fullRedraw) {
+  int hudX = 106;
+  int hudY = 16;
+  int hudW = 246;
+  int hudH = 114;
+
+  if (fullRedraw) {
+    drawBevelBox(hudX, hudY, hudW, hudH, C_UI_BG, false);
+    
+    // Labels beside bars
+    gfx->setTextColor(C_WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(hudX + 8, hudY + 36);
+    gfx->print("F");
+    gfx->setCursor(hudX + 8, hudY + 58);
+    gfx->print("J");
+    gfx->setCursor(hudX + 8, hudY + 80);
+    gfx->print("R");
+  }
+
+  RTC_DateTime dt = rtc.getDateTime();
+  uint8_t hour = min((uint8_t)23, dt.getHour());
+  uint8_t minute = min((uint8_t)59, dt.getMinute());
+
+  char timeBuf[12];
+  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", hour, minute);
+
+  // Clear top header strip
+  gfx->fillRect(hudX + 6, hudY + 8, hudW - 12, 20, C_UI_BG);
+  gfx->setTextSize(2);
+
+  if (currentState == STATE_DEAD) {
+    gfx->setTextColor(C_DANGER_RED);
+    gfx->setCursor(hudX + 10, hudY + 10);
+    gfx->print("R.I.P.");
+  } else {
+    // 1. DAY X in bright gold
+    char dayBuf[16];
+    snprintf(dayBuf, sizeof(dayBuf), "DAY %u", (unsigned int)daysAlive);
+    gfx->setTextColor(C_WIN_SUN);
+    gfx->setCursor(hudX + 8, hudY + 10);
+    gfx->print(dayBuf);
+
+    // 2. Real-time Clock
+    gfx->setTextColor(C_WHITE);
+    gfx->setCursor(hudX + 124, hudY + 10);
+    gfx->print(timeBuf);
+  }
+
+  // 3. Battery Icon at far right
+  drawBatteryIcon(hudX + 210, hudY + 10, batteryPercent, isCharging);
+
+  // 4. Segmented Stat Bars
+  if (starveStartTime > 0 && currentState != STATE_DEAD) {
+    gfx->fillRect(hudX + 32, hudY + 34, 202, 16, C_DANGER_RED);
+    gfx->setTextColor(C_WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(hudX + 44, hudY + 36);
+    gfx->print("! STARVING !");
+  } else {
+    drawSegmentedBar(hudX + 32, hudY + 34, 202, 16, hunger, 0xFA60);
+  }
+
+  drawSegmentedBar(hudX + 32, hudY + 56, 202, 16, happiness, 0x367A);
+  drawSegmentedBar(hudX + 32, hudY + 78, 202, 16, energy, 0x4D7F);
+}
+
+void drawBottomDock(int8_t activeBtn) {
+  int btnY = 368;
+  int btnW = 96;
+  int btnH = 54;
+  int gap = 18;
+  int startX = 22;
+
+  if (currentState == STATE_DEAD) {
+    gfx->fillRect(startX, btnY, SCREEN_W - (startX * 2), btnH, C_BLACK);
+    int revW = 180;
+    int revX = (SCREEN_W - revW) / 2;
+    drawBevelBox(revX, btnY, revW, btnH, 0x8182, (activeBtn == 1));
+    gfx->setTextColor((activeBtn == 1) ? C_WIN_SUN : C_WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(revX + 44, btnY + 18);
+    gfx->print("REVIVE");
+    return;
+  }
+
+  const char* labels[3] = {
+    "FEED", 
+    "PLAY", 
+    (currentState == STATE_SLEEP) ? "WAKE" : "REST"
+  };
+  uint16_t colors[3] = {0xB2A2, 0x2449, (currentState == STATE_SLEEP) ? 0x24B5 : 0x422A};
+
+  for (int i = 0; i < 3; i++) {
+    int bx = startX + i * (btnW + gap);
+    bool pressed = (activeBtn == i);
+
+    drawBevelBox(bx, btnY, btnW, btnH, colors[i], pressed);
+
+    gfx->setTextColor(pressed ? C_WIN_SUN : C_WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(bx + 20, btnY + 18);
+    gfx->print(labels[i]);
+  }
+}
+
+void erasePetRegion() {
+  int x = PET_X;
+  int w = SPRITE_SIZE * SPRITE_SCALE;
+
+  gfx->fillRect(x, 190, w, 26, C_WALL_TOP);
+  for (int sx = 8; sx < SCREEN_W; sx += 16) {
+    if (sx >= x && sx < x + w) {
+      gfx->drawFastVLine(sx, 190, 26, C_WALL_STRIPE);
+    }
+  }
+
+  gfx->fillRect(x, 216, w, 8, C_WOOD_LIGHT);
+  gfx->fillRect(x, 224, w, 20, C_WOOD_DARK);
+  gfx->drawFastHLine(x, 216, w, C_UI_BORDER_LT);
+  gfx->drawFastHLine(x, 244, w, C_BLACK);
+
+  for (int y = 244; y < 330; y += 18) {
+    for (int fx = 108; fx < 260; fx += 36) {
+      bool alt = ((fx / 36) + (y / 18)) % 2 == 0;
+      gfx->fillRect(fx, y, 36, 18, alt ? C_FLOOR_A : C_FLOOR_B);
+      gfx->drawRect(fx, y, 36, 18, C_WOOD_DARK);
+    }
+  }
+
+  gfx->fillEllipse(SCREEN_W / 2, 290, 110, 48, C_RUG_OUTER);
+  gfx->fillEllipse(SCREEN_W / 2, 290, 95, 38, C_RUG_INNER);
+  gfx->drawEllipse(SCREEN_W / 2, 290, 110, 48, C_WOOD_DARK);
+}
+
+void drawPetSprite(const uint8_t sprite[32][32]) {
+  erasePetRegion();
+
+  for (int py = 0; py < SPRITE_SIZE; py++) {
+    for (int px = 0; px < SPRITE_SIZE; px++) {
+      uint8_t colorIndex = pgm_read_byte(&(sprite[py][px]));
+      if (colorIndex != 0) {
+        uint16_t color = petPalette[colorIndex];
+        gfx->fillRect(PET_X + (px * SPRITE_SCALE), PET_Y + (py * SPRITE_SCALE), SPRITE_SCALE, SPRITE_SCALE, color);
+      }
+    }
+  }
+}
+
+bool readTouch(int16_t *x, int16_t *y) {
+  Wire.beginTransmission(0x15);
+  Wire.write(0x02);
+  if (Wire.endTransmission(false) != 0) return false;
+
+  if (Wire.requestFrom((uint8_t)0x15, (uint8_t)5) != 5) return false;
+
+  uint8_t touches = Wire.read() & 0x0F;
+  if (touches == 0) return false;
+
+  uint8_t x_high = Wire.read() & 0x0F;
+  uint8_t x_low  = Wire.read();
+  uint8_t y_high = Wire.read() & 0x0F;
+  uint8_t y_low  = Wire.read();
+
+  *x = (x_high << 8) | x_low;
+  *y = (y_high << 8) | y_low;
+  return true;
+}
+
+void triggerFeed() {
+  if (currentState == STATE_DEAD) return;
+  drawBottomDock(0);
+  soundFeed();
+  hunger = min(100.0f, hunger + 25.0f);
+  happiness = min(100.0f, happiness + 5.0f);
+  starveStartTime = 0;
+
+  if (currentState != STATE_SLEEP) {
+    currentState = STATE_HAPPY;
+    drawPetSprite(spriteHappy);
+    moodResetTick = millis() + 1800;
+  }
+  delay(100);
+  drawBottomDock(-1);
+  drawTopHUD(false);
+  savePetData();
+}
+
+void triggerPlay() {
+  if (currentState == STATE_DEAD || currentState == STATE_SLEEP) return;
+  drawBottomDock(1);
+  soundPlay();
+  happiness = min(100.0f, happiness + 25.0f);
+  energy = max(0.0f, energy - 10.0f);
+  currentState = STATE_HAPPY;
+  drawPetSprite(spriteHappy);
+  moodResetTick = millis() + 2000;
+  delay(100);
+  drawBottomDock(-1);
+  drawTopHUD(false);
+  savePetData();
+}
+
+void triggerSleepToggle() {
+  if (currentState == STATE_DEAD) return;
+  drawBottomDock(2);
+
+  if (currentState == STATE_SLEEP) {
+    currentState = STATE_IDLE;
+    awakeStartTime = millis();
+    soundFeed();
+    drawPetSprite(spriteIdleA);
+  } else {
+    currentState = STATE_SLEEP;
+    soundSleep();
+    drawPetSprite(spriteSleep);
+  }
+  delay(100);
+  drawBottomDock(-1);
+  drawTopHUD(false);
+  savePetData();
+}
+
+void triggerRevive() {
+  drawBottomDock(1);
+  soundRevive();
+  delay(150);
+
+  hunger = 80.0f;
+  happiness = 80.0f;
+  energy = 80.0f;
+  daysAlive = 1;
+  starveStartTime = 0;
+  awakeStartTime = millis();
+  currentState = STATE_IDLE;
+
+  savePetData();
+
+  drawRoomBackground();
+  drawTopHUD(true);
+  drawBottomDock(-1);
+  drawPetSprite(spriteIdleA);
+}
+
+void triggerPetGesture() {
+  if (currentState == STATE_DEAD || currentState == STATE_SLEEP) return;
+  soundFeed();
+  happiness = min(100.0f, happiness + 10.0f);
+  currentState = STATE_HAPPY;
+  drawPetSprite(spriteHappy);
+  moodResetTick = millis() + 1400;
+  drawTopHUD(false);
 }
 
 void setup() {
   USBSerial.begin(115200);
 
-  if (!rtc.begin(Wire, IIC_SDA, IIC_SCL)) {
-    while (1) { delay(1000); }
+  #if BUZZER_PIN >= 0
+    pinMode(BUZZER_PIN, OUTPUT);
+  #endif
+
+  Wire.begin(IIC_SDA, IIC_SCL);
+  rtc.begin(Wire, IIC_SDA, IIC_SCL);
+
+  // Check if RTC is uninitialized or invalid
+  RTC_DateTime dt = rtc.getDateTime();
+  if (dt.getYear() < 2024 || dt.getHour() > 23 || dt.getMinute() > 59 || dt.getDay() == 0 || dt.getDay() > 31) {
+    calibrateRtcFromBuildTime();
+    dt = rtc.getDateTime();
   }
+  lastRecordedDay = dt.getDay();
+
+  readBatteryPMIC();
+  loadPetData();
 
   gfx->begin();
-  gfx->fillScreen(0x0000);
+  gfx->fillScreen(C_BLACK);
   gfx->setBrightness(255);
 
-  drawUIElements(false);
-  drawPet(0, 0);
+  awakeStartTime = millis();
+
+  drawRoomBackground();
+  drawTopHUD(true);
+  drawBottomDock(-1);
+
+  if (currentState == STATE_DEAD) {
+    drawPetSprite(spriteGhost);
+  } else if (currentState == STATE_SLEEP) {
+    drawPetSprite(spriteSleep);
+  } else {
+    drawPetSprite(spriteIdleA);
+  }
 }
 
 void loop() {
-  uint32_t currentMillis = millis();
+  uint32_t now = millis();
 
-  // Hunger & Happiness Decay over time (Every 30 seconds lose 1 happiness)
-  if (currentMillis - lastHungerMillis >= 30000) {
-    lastHungerMillis = currentMillis;
-    if (happiness > 0) {
-      happiness--;
-      drawUIElements(false);
+  // 1. Safe Day Rollover: strictly evaluated once every 60 seconds
+  if (now - lastDayCheckTick >= 60000) {
+    lastDayCheckTick = now;
+    RTC_DateTime dt = rtc.getDateTime();
+    uint8_t currentDay = dt.getDay();
+
+    if (currentDay >= 1 && currentDay <= 31 && currentDay != lastRecordedDay) {
+      lastRecordedDay = currentDay;
+      if (currentState != STATE_DEAD) {
+        daysAlive++;
+        savePetData();
+        drawTopHUD(false);
+      }
     }
   }
 
-  // Behavior & Animation Engine (Every 3 seconds)
-  if (currentMillis - lastAnimMillis >= 3000) {
-    lastAnimMillis = currentMillis;
-
-    if (happiness <= 3) {
-      animState = 0; 
-    } else {
-      animState = random(0, 6);
+  // 2. Auto-Sleep after 4 continuous hours awake
+  if (currentState != STATE_SLEEP && currentState != STATE_DEAD) {
+    if (now - awakeStartTime >= AUTO_SLEEP_TIMEOUT_MS) {
+      currentState = STATE_SLEEP;
+      soundSleep();
+      drawPetSprite(spriteSleep);
+      drawBottomDock(-1);
+      drawTopHUD(false);
+      savePetData();
     }
-
-    if (animState == 4) petOffsetX = -20;
-    else if (animState == 5) petOffsetX = 20;
-    else petOffsetX = 0;
-
-    drawPet(animState, petOffsetX);
   }
 
-  // Touch Handling for Feeding Button
-  int16_t touchX, touchY;
-  if (readTouch(&touchX, &touchY)) {
-    // Check if touch hits the "FEED ME" button area (X: 40 to 200, Y: 260 to 305)
-    if (touchX >= 40 && touchX <= 200 && touchY >= 260 && touchY <= 305) {
-      feedPet();
+  // 3. Stat Decay & Starvation (Evaluated every 5s)
+  if (now - lastStatTick >= 5000) {
+    lastStatTick = now;
+
+    if (currentState != STATE_DEAD) {
+      if (currentState == STATE_SLEEP) {
+        hunger = max(0.0f, hunger - 0.0058f);
+        energy = min(100.0f, energy + 0.35f);
+      } else {
+        hunger = max(0.0f, hunger - 0.0174f);
+        happiness = max(0.0f, happiness - 0.012f);
+        energy = max(0.0f, energy - 0.010f);
+      }
+
+      // Starvation Warning Alert
+      if (hunger <= 0.0f) {
+        if (starveStartTime == 0) {
+          starveStartTime = now;
+          soundStarveAlarm();
+        } else if (now - starveStartTime >= STARVE_GRACE_MS) {
+          currentState = STATE_DEAD;
+          drawPetSprite(spriteGhost);
+          drawBottomDock(-1);
+          savePetData();
+        }
+      }
+      drawTopHUD(false);
+    }
+  }
+
+  // 4. Periodic NVS Flash Save (Every 60s)
+  if (now - lastSaveTick >= 60000) {
+    lastSaveTick = now;
+    savePetData();
+  }
+
+  // 5. Battery and Clock Refresh (Every 10s)
+  if (now - lastClockTick >= 10000) {
+    lastClockTick = now;
+    readBatteryPMIC();
+    drawTopHUD(false);
+  }
+
+  // 6. Idle Animations
+  if (now - lastAnimTick >= 600) {
+    lastAnimTick = now;
+    currentAnimFrame = !currentAnimFrame;
+
+    if (currentState == STATE_IDLE) {
+      drawPetSprite(currentAnimFrame == 0 ? spriteIdleA : spriteIdleB);
+    } else if (currentState == STATE_DEAD) {
+      drawPetSprite(spriteGhost);
+    }
+  }
+
+  // 7. Reset Temporary Emotion
+  if (moodResetTick > 0 && now >= moodResetTick) {
+    moodResetTick = 0;
+    if (currentState == STATE_HAPPY) {
+      currentState = STATE_IDLE;
+      drawBottomDock(-1);
+      drawPetSprite(spriteIdleA);
+    }
+  }
+
+  // 8. Capacitive Touch Handling
+  if (now - lastTouchTick >= 50) {
+    lastTouchTick = now;
+    int16_t tx, ty;
+    if (readTouch(&tx, &ty)) {
+      if (ty >= 360 && ty <= 435) {
+        if (currentState == STATE_DEAD) {
+          if (tx >= 90 && tx <= 278) {
+            triggerRevive();
+          }
+        } else {
+          if (tx >= 20 && tx <= 120) {
+            triggerFeed();
+          } else if (tx >= 134 && tx <= 234) {
+            triggerPlay();
+          } else if (tx >= 248 && tx <= 348) {
+            triggerSleepToggle();
+          }
+        }
+      } else if (ty >= 180 && ty <= 325 && tx >= 110 && tx <= 260) {
+        triggerPetGesture();
+      }
     }
   }
 }
