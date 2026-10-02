@@ -1,0 +1,1120 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include "time.h"
+#include "Arduino_GFX_Library.h"
+#include "Arduino_DriveBus_Library.h"
+#include "pin_config.h"
+#include <Wire.h>
+#include "HWCDC.h"
+
+HWCDC USBSerial;
+Preferences prefs;
+WebServer server(80);
+
+const char* primarySsid     = "DMwifi";
+const char* primaryPassword = "L3tm31nn0w!";
+
+const char* backupSsid      = "DMMobile";
+const char* backupPassword  = "wifi123!";
+
+const char* ntpServer = "pool.ntp.org";
+const char* ukTimeZone = "GMT0BST,M3.5.0/1,M10.5.0"; 
+
+const char* newsFeedUrl = "https://feeds.skynews.com/feeds/rss/home.xml";
+
+#define BUZZER_PIN 1
+#define BOOT_BUTTON_PIN 0  // Standard BOOT button on ESP32-S3
+
+// App Version Number
+const char* APP_VERSION = "v1.0.0";
+
+#define SCREEN_W 368
+#define SCREEN_H 448
+
+#define C_BLACK       0x0000
+#define C_WHITE       0xFFFF
+#define C_RED         0xF800
+#define C_YELLOW      0xFFE0
+#define C_GREEN       0x07E0
+#define C_CYAN        0x07FF
+#define C_MAGENTA     0xF81F
+#define C_PINK        0xF81F
+#define C_TIME_GOLD   0xFFE0
+#define C_BUN_BROWN   0xFC00
+#define C_PATTY_DARK  0x8400
+#define C_LETTUCE     0x0E00
+#define C_MEAT_BROWN  0xD2A8
+#define C_BONE_WHITE  0xFFFF
+#define C_BUBBLE_BG   0x10A2
+#define C_BUBBLE_BRD  0x07FF
+
+Arduino_DataBus *bus = new Arduino_ESP32QSPI(
+  LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
+
+Arduino_CO5300 *gfx = new Arduino_CO5300(
+    bus, GFX_NOT_DEFINED, 0, LCD_WIDTH, LCD_HEIGHT, 16, 0, 0, 0);
+
+Arduino_Canvas *canvas = new Arduino_Canvas(SCREEN_W, SCREEN_H, gfx, 0, 0);
+
+int sleepStartHour = 20; 
+int sleepEndHour   = 8;  
+int lunchHour      = 12; 
+int dinnerHour     = 17; 
+int screenBrightness = 255;
+uint16_t eyeColor = 0x07FF;   
+
+bool canvasReady = false;
+bool showNetworkStats = false; // Toggle for network stats screen
+bool lastButtonState = HIGH;
+uint32_t lastDebounceTime = 0;
+
+int batteryPercentage = 85; 
+bool isCharging = true;
+bool lowBatteryAlertActive = false;
+uint32_t lowBatteryAlertTimer = 0;
+
+struct EyeState {
+  float leftX, leftY;
+  float rightX, rightY;
+  float width, height;
+  float cornerRadius;
+  float blinkAmount;
+  int shapeType; 
+};
+
+EyeState currentEyes = {114, 160, 254, 160, 100, 110, 35, 0.0f, 0};
+EyeState targetEyes  = {114, 160, 254, 160, 100, 110, 35, 0.0f, 0};
+
+uint32_t lastActionTime = 0;
+uint32_t nextInterval = 3000;
+uint32_t lastRareExpressionMillis = 0;
+const uint32_t RARE_EXPRESSION_INTERVAL_MS = 15 * 60 * 1000UL; 
+
+bool isBlinking = false;
+uint32_t blinkTimer = 0;
+
+bool isSleeping = false;
+bool sleepTransitionActive = false;
+uint32_t sleepTransitionTimer = 0;
+
+bool eatingActive = false;
+int eatingType = 0; 
+uint32_t eatingStartTime = 0;
+const uint32_t EATING_DURATION_MS = 60000;
+
+bool timerActive = false;
+unsigned long timerTotalSeconds = 0;
+unsigned long timerStartMillis = 0;
+
+bool celebrationActive = false;
+uint32_t celebrationTimer = 0;
+
+struct ConfettiParticle {
+  float x, y;
+  float speedY;
+  float speedX;
+  uint16_t color;
+};
+ConfettiParticle confetti[25];
+
+const char* motivationalQuotes[20] = {
+  "Keep going, nearly lunch time!",
+  "Not long until home time now!",
+  "Dont forget to focus on what matters.",
+  "Great things are done by a series of small things brought together.",
+  "Rise and grind, let's crush today's goals!",
+  "Coffee is brewing, success is incoming.",
+  "Focus on progress, not perfection.",
+  "Take a deep breath and reset your focus.",
+  "You are capable of amazing things today.",
+  "Stay positive, work hard, make it happen.",
+  "One task at a time, you've got this.",
+  "Push harder than yesterday if you want a different tomorrow.",
+  "Keep your eyes on the prize and keep moving.",
+  "Almost there, finish strong!",
+  "Small progress each day adds up to big results.",
+  "Energy flows where attention goes. Stay sharp!",
+  "Success is the sum of small efforts repeated daily.",
+  "Make today so awesome yesterday gets jealous.",
+  "Time to wrap up and plan for a great evening.",
+  "Time to power down and enjoy the rest of your day."
+};
+
+String quotePages[6];
+int totalQuotePages = 0;
+int currentQuotePageIdx = 0;
+bool quoteDisplayActive = false;
+uint32_t lastQuoteSwitchTimer = 0;
+uint32_t lastQuoteTriggerMillis = 0;
+const uint32_t QUOTE_INTERVAL_MS = 45 * 60 * 1000UL;
+
+String newsPages[6];
+int totalPages = 0;
+int currentPageIndex = 0;
+bool newsTickerActive = false;
+uint32_t lastPageSwitchTimer = 0;
+uint32_t lastNewsFetchMillis = 0;
+const uint32_t NEWS_FETCH_INTERVAL_MS = 15 * 60 * 1000UL; 
+
+struct ZParticle {
+  float x, y;
+  float speed;
+};
+ZParticle zParticles[3] = {
+  {240, 90, 0.8f},
+  {265, 70, 1.2f},
+  {290, 50, 0.6f}
+};
+
+uint16_t hexToRGB565(String hex) {
+  if (hex.startsWith("#")) hex = hex.substring(1);
+  long number = strtol(hex.c_str(), NULL, 16);
+  uint8_t r = (number >> 16) & 0xFF;
+  uint8_t g = (number >> 8) & 0xFF;
+  uint8_t b = number & 0xFF;
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+String rgb565ToHex(uint16_t color) {
+  uint8_t r = (color & 0xF800) >> 8;
+  uint8_t g = (color & 0x07E0) >> 3;
+  uint8_t b = (color & 0x001F) << 3;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "#%02x%02x%02x", r, g, b);
+  return String(buf);
+}
+
+void playTone(int frequency, int durationMs) {
+  #if BUZZER_PIN >= 0
+    pinMode(BUZZER_PIN, OUTPUT);
+    long periodUs = 1000000L / frequency;
+    long halfPeriodUs = periodUs / 2;
+    long cycles = (long)frequency * durationMs / 1000;
+    for (long i = 0; i < cycles; i++) {
+      digitalWrite(BUZZER_PIN, HIGH);
+      delayMicroseconds(halfPeriodUs);
+      digitalWrite(BUZZER_PIN, LOW);
+      delayMicroseconds(halfPeriodUs);
+    }
+    digitalWrite(BUZZER_PIN, LOW);
+  #endif
+}
+
+void playChime(bool happy = true) {
+  if (happy) {
+    playTone(523, 80); delay(30);
+    playTone(659, 80); delay(30);
+    playTone(784, 120);
+  } else {
+    playTone(440, 200);
+  }
+}
+
+void playFanfare() {
+  int notes[] = {523, 659, 784, 1046, 784, 1046};
+  int durations[] = {120, 120, 120, 250, 120, 350};
+  for (int i = 0; i < 6; i++) {
+    playTone(notes[i], durations[i]);
+    delay(35);
+  }
+}
+
+void initConfetti() {
+  uint16_t colors[] = {C_RED, C_YELLOW, C_GREEN, C_CYAN, C_MAGENTA, C_WHITE};
+  for (int i = 0; i < 25; i++) {
+    confetti[i].x = random(10, SCREEN_W - 10);
+    confetti[i].y = random(-100, 0);
+    confetti[i].speedY = random(2, 6);
+    confetti[i].speedX = random(-10, 11) / 10.0f;
+    confetti[i].color = colors[random(0, 6)];
+  }
+}
+
+void formatTextIntoPagesMax(String text, String targetPages[], int &targetTotalPages) {
+  targetTotalPages = 0;
+  String lines[20];
+  int totalLines = 0;
+
+  String currentLine = "";
+  int idx = 0;
+  while (idx < text.length()) {
+    int nextSpace = text.indexOf(' ', idx);
+    String word = "";
+    if (nextSpace == -1) {
+      word = text.substring(idx);
+      idx = text.length();
+    } else {
+      word = text.substring(idx, nextSpace);
+      idx = nextSpace + 1;
+    }
+
+    if ((currentLine.length() + word.length() + 1) <= 9) {
+      if (currentLine.length() > 0) currentLine += " ";
+      currentLine += word;
+    } else {
+      lines[totalLines++] = currentLine;
+      currentLine = word;
+      if (totalLines >= 20) break;
+    }
+  }
+  if (currentLine.length() > 0 && totalLines < 20) {
+    lines[totalLines++] = currentLine;
+  }
+
+  for (int i = 0; i < totalLines; i += 3) {
+    String pageStr = lines[i] + "\n";
+    if (i + 1 < totalLines) pageStr += lines[i + 1] + "\n";
+    else pageStr += "\n";
+    if (i + 2 < totalLines) pageStr += lines[i + 2];
+    else pageStr += "";
+
+    targetPages[targetTotalPages++] = pageStr;
+    if (targetTotalPages >= 6) break;
+  }
+}
+
+void showQuote(int quoteIndex) {
+  formatTextIntoPagesMax(String(motivationalQuotes[quoteIndex]), quotePages, totalQuotePages);
+  quoteDisplayActive = true;
+  lastQuoteSwitchTimer = millis();
+  currentQuotePageIdx = 0;
+  playChime(true);
+}
+
+void checkScheduledQuotes() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return;
+
+  int hour = timeinfo.tm_hour;
+  int min = timeinfo.tm_min;
+  int sec = timeinfo.tm_sec;
+
+  if (sec == 0) {
+    if (hour == 11 && min == 30) {
+      showQuote(0);
+    } else if (hour == 16 && min == 0) {
+      showQuote(1);
+    } else if (hour == 9 && min == 0) {
+      showQuote(4);
+    }
+  }
+
+  uint32_t now = millis();
+  if (hour >= 9 && hour < 17 && !quoteDisplayActive && !newsTickerActive && !celebrationActive && !lowBatteryAlertActive && !showNetworkStats) {
+    if (now - lastQuoteTriggerMillis >= QUOTE_INTERVAL_MS) {
+      lastQuoteTriggerMillis = now;
+      int rIdx = random(2, 20);
+      showQuote(rIdx);
+    }
+  }
+}
+
+void fetchSkyNews() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(newsFeedUrl);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    int itemIdx = payload.indexOf("<item>");
+    if (itemIdx != -1) {
+      int titleStart = payload.indexOf("<title>", itemIdx);
+      int titleEnd = payload.indexOf("</title>", titleStart);
+      if (titleStart != -1 && titleEnd != -1) {
+        String rawTitle = payload.substring(titleStart + 7, titleEnd);
+        rawTitle.replace("&#39;", "'");
+        rawTitle.replace("&amp;", "&");
+        rawTitle.replace("&quot;", "\"");
+        
+        formatTextIntoPagesMax(rawTitle, newsPages, totalPages);
+        
+        newsTickerActive = true;
+        lastPageSwitchTimer = millis();
+        currentPageIndex = 0;
+        playChime(true);
+      }
+    }
+  }
+  http.end();
+}
+
+void updateBatteryStatus() {
+  batteryPercentage = 85; 
+  isCharging = true;
+
+  if (!isCharging && batteryPercentage <= 10 && !lowBatteryAlertActive) {
+    lowBatteryAlertActive = true;
+    lowBatteryAlertTimer = millis();
+    playChime(false);
+  }
+}
+
+void loadSettings() {
+  prefs.begin("looi_cfg", true);
+  sleepStartHour   = prefs.getInt("sleepStart", 20);
+  sleepEndHour     = prefs.getInt("sleepEnd", 8);
+  lunchHour        = prefs.getInt("lunch", 12);
+  dinnerHour       = prefs.getInt("dinner", 17);
+  screenBrightness = prefs.getInt("brightness", 255);
+  eyeColor         = prefs.getUShort("eyeColor", 0x07FF);
+  prefs.end();
+}
+
+void saveSettings() {
+  prefs.begin("looi_cfg", false);
+  prefs.putInt("sleepStart", sleepStartHour);
+  prefs.putInt("sleepEnd", sleepEndHour);
+  prefs.putInt("lunch", lunchHour);
+  prefs.putInt("dinner", dinnerHour);
+  prefs.putInt("brightness", screenBrightness);
+  prefs.putUShort("eyeColor", eyeColor);
+  prefs.end();
+}
+
+void handleRoot() {
+  updateBatteryStatus();
+
+  struct tm timeinfo;
+  char timeStr[40] = "Synchronizing Time...";
+  if (getLocalTime(&timeinfo)) {
+    strftime(timeStr, sizeof(timeStr), "%A, %d %B %Y - %H:%M:%S", &timeinfo);
+  }
+
+  String html = F("<!DOCTYPE html><html lang=\"en\">");
+  html += F("<head><meta charset=\"UTF-8\">");
+  html += F("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  html += F("<title>Looi Robot Control Center</title>");
+  html += F("<style>");
+  html += F("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0b0d14; color: #e2e8f0; margin: 0; padding: 16px; text-align: center; }");
+  html += F(".card { background: #151922; border-radius: 14px; padding: 22px; margin: 16px auto; max-width: 400px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); border: 1px solid #222836; }");
+  html += F("h2 { color: #38bdf8; margin-top: 0; font-size: 1.4rem; }");
+  html += F("h3 { color: #f1f5f9; font-size: 1.1rem; border-bottom: 1px solid #222836; padding-bottom: 8px; margin-top: 0; }");
+  html += F(".status { font-weight: bold; color: #4ade80; background: rgba(74,222,128,0.1); padding: 4px 10px; border-radius: 6px; display: inline-block; margin-top: 6px;}");
+  html += F(".bat-status { font-weight: bold; color: #38bdf8; background: rgba(56,189,248,0.1); padding: 4px 10px; border-radius: 6px; display: inline-block; margin-top: 6px;}");
+  html += F(".time-box { font-size: 1.05rem; color: #fbbf24; font-weight: 600; margin-top: 8px; }");
+  html += F("label { display: block; margin: 12px 0 4px; text-align: left; font-size: 0.85rem; color: #94a3b8; font-weight: 500; }");
+  html += F("input[type=number], input[type=range] { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #0b0d14; color: #fff; box-sizing: border-box; font-size: 1rem; }");
+  html += F("input[type=color] { width: 100%; height: 44px; border: none; border-radius: 8px; background: none; cursor: pointer; }");
+  html += F(".btn { background: #38bdf8; color: #0b0d14; font-weight: 700; border: none; padding: 12px 16px; margin: 6px 3px; border-radius: 8px; cursor: pointer; width: 47%; font-size: 0.95rem; transition: opacity 0.2s; }");
+  html += F(".btn-secondary { background: #f43f5e; color: #fff; }");
+  html += F(".btn-full { width: 100%; margin-top: 14px; }");
+  html += F(".btn:hover { opacity: 0.85; }");
+  html += F("</style></head><body>");
+
+  html += F("<div class=\"card\"><h2>Looi Robot Control</h2>");
+  html += F("<div class=\"time-box\">");
+  html += timeStr;
+  html += F("</div>");
+  html += F("<div style=\"margin-top:12px;\">Status: <span class=\"status\">");
+  html += celebrationActive ? "Celebrating 🎉" : (timerActive ? "Timer Running ⏱" : (isSleeping ? "Sleeping 💤" : (eatingActive ? "Eating 🍔" : "Active 👁️")));
+  html += F("</span></div></div>");
+
+  html += F("<div class=\"card\"><h3>🔋 Battery Status</h3>");
+  html += F("<div style=\"font-size: 1.2rem; font-weight: bold; color: #f8fafc; margin-bottom: 8px;\">");
+  html += String(batteryPercentage) + "%";
+  html += F("</div>");
+  html += F("<div>State: <span class=\"bat-status\">");
+  if (isCharging) {
+    html += F("⚡ Charging (Plugged In)");
+  } else {
+    int totalMinutesLeft = (batteryPercentage * 300) / 100;
+    int hrs = totalMinutesLeft / 60;
+    int mins = totalMinutesLeft % 60;
+    html += "🔋 Discharging (~" + String(hrs) + "h " + String(mins) + "m left)";
+  }
+  html += F("</span></div></div>");
+
+  html += F("<div class=\"card\"><h3>⏱️ Start Countdown Timer</h3>");
+  html += F("<form action=\"/timer\" method=\"POST\">");
+  html += F("<label>Duration (Seconds):</label><input type=\"number\" name=\"seconds\" min=\"5\" max=\"3600\" value=\"60\">");
+  html += F("<button type=\"submit\" class=\"btn btn-full\" style=\"background:#38bdf8; color:#0b0d14;\">Start Timer</button>");
+  html += F("</form></div>");
+
+  html += F("<div class=\"card\"><h3>Customization & Schedule</h3>");
+  html += F("<form action=\"/save\" method=\"POST\">");
+  
+  html += F("<label>Screen Brightness (0-255):</label>");
+  html += F("<input type=\"number\" name=\"brightness\" min=\"10\" max=\"255\" value=\"");
+  html += String(screenBrightness);
+  html += F("\">");
+
+  html += F("<label>Eye Color:</label>");
+  html += F("<input type=\"color\" name=\"eyeColor\" value=\"");
+  html += rgb565ToHex(eyeColor);
+  html += F("\">");
+
+  html += F("<label>Bedtime Hour (0-23):</label><input type=\"number\" name=\"sleepStart\" min=\"0\" max=\"23\" value=\"");
+  html += String(sleepStartHour);
+  html += F("\">");
+  html += F("<label>Wakeup Hour (0-23):</label><input type=\"number\" name=\"sleepEnd\" min=\"0\" max=\"23\" value=\"");
+  html += String(sleepEndHour);
+  html += F("\">");
+  html += F("<label>Lunch Hour (0-23):</label><input type=\"number\" name=\"lunch\" min=\"0\" max=\"23\" value=\"");
+  html += String(lunchHour);
+  html += F("\">");
+  html += F("<label>Dinner Hour (0-23):</label><input type=\"number\" name=\"dinner\" min=\"0\" max=\"23\" value=\"");
+  html += String(dinnerHour);
+  html += F("\">");
+
+  html += F("<button type=\"submit\" class=\"btn btn-full\" style=\"background:#10b981; color:#fff;\">Save Settings</button>");
+  html += F("</form></div>");
+
+  html += F("<div class=\"card\"><h3>Manual Triggers</h3>");
+  html += F("<button class=\"btn\" onclick=\"location.href='/trigger?action=burger'\">Feed Burger</button>");
+  html += F("<button class=\"btn\" onclick=\"location.href='/trigger?action=chicken'\">Feed Chicken</button>");
+  html += F("<button class=\"btn\" onclick=\"location.href='/trigger?action=news'\">Fetch News</button>");
+  html += F("<button class=\"btn\" onclick=\"location.href='/trigger?action=quote'\">Say Quote</button>");
+  html += F("<button class=\"btn btn-secondary\" onclick=\"location.href='/trigger?action=toggle_sleep'\">Toggle Sleep</button>");
+  html += F("</div></body></html>");
+
+  server.send(200, "text/html", html);
+}
+
+void handleSave() {
+  if (server.hasArg("sleepStart"))   sleepStartHour   = server.arg("sleepStart").toInt();
+  if (server.hasArg("sleepEnd"))     sleepEndHour     = server.arg("sleepEnd").toInt();
+  if (server.hasArg("lunch"))        lunchHour        = server.arg("lunch").toInt();
+  if (server.hasArg("dinner"))       dinnerHour     = server.arg("dinner").toInt();
+  if (server.hasArg("brightness")) {
+    screenBrightness = constrain(server.arg("brightness").toInt(), 10, 255);
+    if (!isSleeping) gfx->setBrightness(screenBrightness);
+  }
+  if (server.hasArg("eyeColor")) {
+    eyeColor = hexToRGB565(server.arg("eyeColor"));
+  }
+
+  saveSettings();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleTimerStart() {
+  if (server.hasArg("seconds")) {
+    long secs = server.arg("seconds").toInt();
+    if (secs > 0) {
+      timerTotalSeconds = secs;
+      timerStartMillis = millis();
+      timerActive = true;
+      celebrationActive = false;
+      playChime(true);
+    }
+  }
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void startSleepTransition(bool targetSleepState) {
+  isSleeping = targetSleepState;
+  sleepTransitionActive = true;
+  sleepTransitionTimer = millis();
+
+  if (isSleeping) {
+    gfx->setBrightness(15); 
+    playChime(false);
+  } else {
+    gfx->setBrightness(screenBrightness); 
+    playChime(true);
+  }
+}
+
+void handleTrigger() {
+  if (server.hasArg("action")) {
+    String act = server.arg("action");
+    if (act == "burger") {
+      eatingActive = true; eatingType = 1; eatingStartTime = millis(); playChime(true);
+    } else if (act == "chicken") {
+      eatingActive = true; eatingType = 2; eatingStartTime = millis(); playChime(true);
+    } else if (act == "news") {
+      fetchSkyNews();
+    } else if (act == "quote") {
+      showQuote(random(0, 20));
+    } else if (act == "toggle_sleep") {
+      startSleepTransition(!isSleeping);
+    }
+  }
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/timer", HTTP_POST, handleTimerStart);
+  server.on("/trigger", HTTP_GET, handleTrigger);
+  server.begin();
+}
+
+void connectWiFi() {
+  WiFi.begin(primarySsid, primaryPassword);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+    delay(500);
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.begin(backupSsid, backupPassword);
+    attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+      delay(500);
+      attempts++;
+    }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    configTzTime(ukTimeZone, ntpServer);
+    setupWebServer();
+    formatTextIntoPagesMax("Sky News Live: Welcome to your smart desktop companion!", newsPages, totalPages);
+    lastNewsFetchMillis = millis();
+  }
+}
+
+void applyExpression(int expType) {
+  if (isSleeping || sleepTransitionActive || eatingActive || celebrationActive) return;
+  
+  switch (expType) {
+    case 0: 
+      targetEyes = {114, 160, 254, 160, 100, 110, 35, 0.0f, 0}; 
+      break;
+    case 1: 
+      targetEyes = {114, 170, 254, 170, 105, 70, 30, 0.0f, 2}; 
+      break;
+    case 2: 
+      targetEyes = {114, 165, 254, 165, 110, 80, 20, 0.0f, 1}; 
+      break;
+    case 3: 
+      targetEyes = {114, 160, 254, 160, 115, 65, 15, 0.0f, 3}; 
+      break;
+  }
+}
+
+void drawCustomEye(int cx, int cy, int w, int h, int r, int shapeType, uint16_t col) {
+  if (shapeType == 0) {
+    canvas->fillRoundRect(cx - w / 2, cy - h / 2, w, h, r, col);
+  } 
+  else if (shapeType == 1) {
+    canvas->fillRoundRect(cx - w / 2, cy - h / 2, w, h, r, col);
+    canvas->fillTriangle(cx - w/2 - 2, cy - h/2 - 2, cx - w/2 + 25, cy - h/2 - 2, cx - w/2 - 2, cy + h/2 + 2, C_BLACK);
+  } 
+  else if (shapeType == 2) {
+    canvas->fillRoundRect(cx - w / 2, cy - h / 2, w, h, r, col);
+    canvas->fillRect(cx - w/2 - 5, cy - h/2 - 10, w + 10, h/2, C_BLACK);
+    canvas->fillRoundRect(cx - w/2, cy - h/2, w, h/2 + 5, r, col);
+  } 
+  else if (shapeType == 3) {
+    canvas->fillRoundRect(cx - w / 2, cy - h / 2, w, h, r, col);
+    if (cx < SCREEN_W / 2) {
+      canvas->fillTriangle(cx + w/2 + 2, cy - h/2 - 2, cx + w/2 + 2, cy + h/2 + 2, cx, cy - h/2 - 2, C_BLACK);
+    } else {
+      canvas->fillTriangle(cx - w/2 - 2, cy - h/2 - 2, cx - w/2 - 2, cy + h/2 + 2, cx, cy - h/2 - 2, C_BLACK);
+    }
+  }
+}
+
+void drawKawaiiStarEye(int cx, int cy) {
+  canvas->fillCircle(cx, cy, 32, C_BLACK);
+  canvas->fillCircle(cx - 22, cy - 12, 22, C_BLACK);
+  canvas->fillCircle(cx + 22, cy - 12, 22, C_BLACK);
+  canvas->fillCircle(cx - 22, cy + 18, 22, C_BLACK);
+  canvas->fillCircle(cx + 22, cy + 18, 22, C_BLACK);
+
+  canvas->fillCircle(cx, cy, 28, C_YELLOW);
+  canvas->fillCircle(cx - 18, cy - 10, 18, C_YELLOW);
+  canvas->fillCircle(cx - 18, cy + 14, 18, C_YELLOW);
+  canvas->fillCircle(cx + 18, cy - 10, 18, C_YELLOW);
+  canvas->fillCircle(cx + 18, cy + 14, 18, C_YELLOW);
+
+  canvas->fillCircle(cx + 10, cy - 6, 8, C_WHITE);
+  canvas->fillCircle(cx + 12, cy + 8, 4, C_WHITE);
+}
+
+void drawBurger(int x, int y, float remainingRatio) {
+  int fullW = 60;
+  int currentW = (int)(fullW * remainingRatio);
+  if (currentW <= 0) return;
+
+  canvas->fillRoundRect(x, y + 30, currentW, 14, 4, C_BUN_BROWN);
+  if (currentW > 12) canvas->fillRect(x + 5, y + 18, currentW - 10, 12, C_PATTY_DARK);
+  if (currentW > 24) canvas->fillRect(x + 10, y + 10, currentW - 20, 8, C_LETTUCE);
+  canvas->fillRoundRect(x, y, currentW, 16, 6, C_BUN_BROWN);
+}
+
+void drawChickenLeg(int x, int y, float remainingRatio) {
+  int fullLen = 60;
+  int currentLen = (int)(fullLen * remainingRatio);
+  if (currentLen <= 0) return;
+
+  canvas->fillRoundRect(x, y + 12, 20, 10, 3, C_BONE_WHITE);
+  if (currentLen > 18) {
+    canvas->fillCircle(x + 26, y + 17, min(20, (int)(20 * remainingRatio)), C_MEAT_BROWN);
+  }
+}
+
+void renderNetworkStatsScreen() {
+  canvas->fillScreen(C_BLACK);
+
+  // Outer Box Border
+  canvas->drawRoundRect(20, 20, 328, 408, 12, C_BUBBLE_BRD);
+
+  // Title
+  canvas->setTextSize(3);
+  canvas->setTextColor(C_TIME_GOLD);
+  canvas->setCursor(55, 45);
+  canvas->print("NETWORK STATS");
+
+  canvas->drawFastHLine(35, 85, 298, C_BUBBLE_BRD);
+
+  struct tm timeinfo;
+  char dateStr[30] = "Date: --/--/----";
+  char timeStr[30] = "Time: --:--:--";
+  if (getLocalTime(&timeinfo)) {
+    strftime(dateStr, sizeof(dateStr), "%d %b %Y", &timeinfo);
+    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+  }
+
+  canvas->setTextSize(2);
+  
+  // Date & Time
+  canvas->setTextColor(C_WHITE);
+  canvas->setCursor(35, 110);
+  canvas->print("Date:");
+  canvas->setTextColor(C_CYAN);
+  canvas->setCursor(110, 110);
+  canvas->print(dateStr);
+
+  canvas->setTextColor(C_WHITE);
+  canvas->setCursor(35, 150);
+  canvas->print("Time:");
+  canvas->setTextColor(C_CYAN);
+  canvas->setCursor(110, 150);
+  canvas->print(timeStr);
+
+  // WiFi Name (SSID)
+  String wifiSsidStr = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : "Disconnected";
+  canvas->setTextColor(C_WHITE);
+  canvas->setCursor(35, 210);
+  canvas->print("Wi-Fi:");
+  canvas->setTextColor(C_GREEN);
+  canvas->setCursor(110, 210);
+  canvas->print(wifiSsidStr);
+
+  // IP Address / Web UI URL
+  String ipStr = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "0.0.0.0";
+  canvas->setTextColor(C_WHITE);
+  canvas->setCursor(35, 250);
+  canvas->print("IP URL:");
+  canvas->setTextColor(C_YELLOW);
+  canvas->setCursor(35, 280);
+  canvas->print("http://" + ipStr);
+
+  // App Version
+  canvas->setTextColor(C_WHITE);
+  canvas->setCursor(35, 340);
+  canvas->print("Version:");
+  canvas->setTextColor(C_MAGENTA);
+  canvas->setCursor(140, 340);
+  canvas->print(APP_VERSION);
+
+  // Footer Hint
+  canvas->setTextSize(1);
+  canvas->setTextColor(C_WHITE);
+  canvas->setCursor(85, 395);
+  canvas->print("Press BOOT to return");
+
+  canvas->flush();
+}
+
+void renderScene() {
+  if (!canvasReady) return;
+
+  if (showNetworkStats) {
+    renderNetworkStatsScreen();
+    return;
+  }
+
+  canvas->fillScreen(C_BLACK);
+
+  if (!isCharging && batteryPercentage <= 10) {
+    if (lowBatteryAlertActive) {
+      if (millis() - lowBatteryAlertTimer > 60000) {
+        lowBatteryAlertActive = false;
+      }
+    }
+  } else {
+    lowBatteryAlertActive = false;
+  }
+
+  if (celebrationActive) {
+    int lx = (int)currentEyes.leftX;
+    int ly = (int)currentEyes.leftY;
+    int rx = (int)currentEyes.rightX;
+    int ry = (int)currentEyes.rightY;
+
+    canvas->drawArc(lx, ly - 45, 24, 20, 190, 350, C_WHITE);
+    canvas->drawArc(rx, ry - 45, 24, 20, 190, 350, C_WHITE);
+
+    drawKawaiiStarEye(lx, ly);
+    drawKawaiiStarEye(rx, ry);
+
+    canvas->fillCircle(lx - 15, ly + 55, 12, C_PINK);
+    canvas->fillCircle(rx + 15, ry + 55, 12, C_PINK);
+
+    int mx = (lx + rx) / 2;
+    int my = ly + 50;
+    canvas->fillCircle(mx, my, 18, C_BLACK);
+    canvas->fillCircle(mx, my, 16, C_RED);
+    canvas->fillTriangle(mx - 16, my - 10, mx + 16, my - 10, mx, my, C_BLACK);
+
+    for (int i = 0; i < 25; i++) {
+      canvas->fillCircle((int)confetti[i].x, (int)confetti[i].y, 4, confetti[i].color);
+      confetti[i].y += confetti[i].speedY;
+      confetti[i].x += confetti[i].speedX;
+      if (confetti[i].y > SCREEN_H + 10) {
+        confetti[i].y = random(-50, 0);
+        confetti[i].x = random(10, SCREEN_W - 10);
+      }
+    }
+
+    canvas->setTextSize(3);
+    canvas->setTextColor(C_YELLOW);
+    canvas->setCursor(85, 30);
+    canvas->print("TIME'S UP!");
+
+    if (millis() - celebrationTimer > 15000) {
+      celebrationActive = false;
+      applyExpression(0);
+    }
+  } 
+  else {
+    float lH = currentEyes.height * (1.0f - currentEyes.blinkAmount);
+    float rH = currentEyes.height * (1.0f - currentEyes.blinkAmount);
+    if (lH < 6) lH = 6;
+    if (rH < 6) rH = 6;
+
+    int lx = (int)currentEyes.leftX;
+    int ly = (int)currentEyes.leftY; 
+    int rx = (int)currentEyes.rightX;
+    int ry = (int)currentEyes.rightY; 
+    int w  = (int)currentEyes.width;
+    int r  = (int)currentEyes.cornerRadius;
+    int shape = targetEyes.shapeType;
+
+    if (isSleeping && !sleepTransitionActive) {
+      canvas->fillRoundRect(lx - w / 2, ly, w, 12, 4, eyeColor);
+      canvas->fillRoundRect(rx - w / 2, ry, w, 12, 4, eyeColor);
+
+      canvas->setTextSize(3);
+      canvas->setTextColor(C_TIME_GOLD);
+      for (int i = 0; i < 3; i++) {
+        canvas->setCursor((int)zParticles[i].x, (int)zParticles[i].y);
+        canvas->print("z");
+        zParticles[i].y -= zParticles[i].speed;
+        zParticles[i].x += 0.3f;
+        if (zParticles[i].y < 30) {
+          zParticles[i].y = 150;
+          zParticles[i].x = 240 + random(0, 40);
+        }
+      }
+    } 
+    else {
+      int chewOffset = 0;
+      if (eatingActive) {
+        chewOffset = (millis() / 150) % 2 == 0 ? -5 : 3;
+      }
+
+      drawCustomEye(lx, ly + chewOffset, w, (int)lH, r, shape, eyeColor);
+      drawCustomEye(rx, ry + chewOffset, w, (int)rH, r, shape, eyeColor);
+
+      if (timerActive) {
+        unsigned long elapsedSec = (millis() - timerStartMillis) / 1000;
+        long remainingSec = (long)timerTotalSeconds - (long)elapsedSec;
+
+        if (remainingSec <= 0) {
+          timerActive = false;
+          celebrationActive = true;
+          celebrationTimer = millis();
+          initConfetti();
+          playFanfare();
+        } else {
+          int mins = remainingSec / 60;
+          int secs = remainingSec % 60;
+          char timeBuf[10];
+          snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", mins, secs);
+
+          canvas->setTextSize(4);
+          canvas->setTextColor(C_TIME_GOLD);
+          canvas->setCursor(130, 40);
+          canvas->print(timeBuf);
+        }
+      }
+
+      if (lowBatteryAlertActive) {
+        bool flashOn = (millis() / 400) % 2 == 0;
+        uint16_t boxColor = flashOn ? C_RED : C_BLACK;
+
+        canvas->fillRoundRect(15, 210, 338, 210, 12, boxColor);
+        canvas->drawRoundRect(15, 210, 338, 210, 12, C_WHITE);
+
+        canvas->setTextSize(3);
+        canvas->setTextColor(C_WHITE);
+        canvas->setCursor(30, 245);
+        canvas->print("Battery at 10%!");
+        canvas->setCursor(30, 305);
+        canvas->print("Give me power!");
+      }
+      else if (quoteDisplayActive && totalQuotePages > 0) {
+        canvas->fillRoundRect(15, 210, 338, 210, 12, C_BUBBLE_BG);
+        canvas->drawRoundRect(15, 210, 338, 210, 12, C_BUBBLE_BRD);
+
+        canvas->setTextSize(4);
+        canvas->setTextColor(C_WHITE);
+        
+        String pageStr = quotePages[currentQuotePageIdx];
+        int fN = pageStr.indexOf('\n');
+        int sN = pageStr.indexOf('\n', fN + 1);
+
+        String l1 = pageStr.substring(0, fN);
+        String l2 = pageStr.substring(fN + 1, sN);
+        String l3 = pageStr.substring(sN + 1);
+
+        canvas->setCursor(22, 230);
+        canvas->print(l1);
+        canvas->setCursor(22, 275);
+        canvas->print(l2);
+        canvas->setCursor(22, 320);
+        canvas->print(l3);
+
+        if (millis() - lastQuoteSwitchTimer > 6000) {
+          lastQuoteSwitchTimer = millis();
+          currentQuotePageIdx++;
+          if (currentQuotePageIdx >= totalQuotePages) {
+            quoteDisplayActive = false;
+            applyExpression(0);
+          }
+        }
+      }
+      else if (newsTickerActive && totalPages > 0) {
+        canvas->fillRoundRect(15, 210, 338, 210, 12, C_BUBBLE_BG);
+        canvas->drawRoundRect(15, 210, 338, 210, 12, C_BUBBLE_BRD);
+
+        canvas->setTextSize(4);
+        canvas->setTextColor(C_WHITE);
+        
+        String pageStr = newsPages[currentPageIndex];
+        int firstNewline = pageStr.indexOf('\n');
+        int secondNewline = pageStr.indexOf('\n', firstNewline + 1);
+
+        String line1 = pageStr.substring(0, firstNewline);
+        String line2 = pageStr.substring(firstNewline + 1, secondNewline);
+        String line3 = pageStr.substring(secondNewline + 1);
+
+        canvas->setCursor(22, 230);
+        canvas->print(line1);
+        canvas->setCursor(22, 275);
+        canvas->print(line2);
+        canvas->setCursor(22, 320);
+        canvas->print(line3);
+
+        if (millis() - lastPageSwitchTimer > 6000) {
+          lastPageSwitchTimer = millis();
+          currentPageIndex++;
+          if (currentPageIndex >= totalPages) {
+            newsTickerActive = false;
+            applyExpression(0);
+          }
+        }
+      }
+
+      if (eatingActive) {
+        uint32_t elapsed = millis() - eatingStartTime;
+        if (elapsed >= EATING_DURATION_MS) {
+          eatingActive = false;
+          applyExpression(0);
+        } else {
+          float progress = (float)elapsed / (float)EATING_DURATION_MS;
+          float remainingRatio = 1.0f - progress;
+
+          if (eatingType == 1) {
+            drawBurger(280, 100 + chewOffset, remainingRatio);
+          } else if (eatingType == 2) {
+            drawChickenLeg(275, 105 + chewOffset, remainingRatio);
+          }
+        }
+      }
+    }
+  }
+
+  canvas->flush();
+}
+
+void setup() {
+  USBSerial.begin(115200);
+  delay(500);
+
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+  #if BUZZER_PIN >= 0
+    pinMode(BUZZER_PIN, OUTPUT);
+  #endif
+
+  gfx->begin();
+  gfx->fillScreen(C_BLACK);
+
+  loadSettings();
+  gfx->setBrightness(isSleeping ? 15 : screenBrightness);
+
+  randomSeed(analogRead(0));
+
+  if (canvas->begin(GFX_SKIP_OUTPUT_BEGIN)) {
+    canvasReady = true;
+  }
+
+  connectWiFi();
+  applyExpression(0);
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
+  }
+
+  // Handle BOOT button press with debounce
+  int currentButtonState = digitalRead(BOOT_BUTTON_PIN);
+  if (currentButtonState == LOW && lastButtonState == HIGH) {
+    if (millis() - lastDebounceTime > 250) {
+      lastDebounceTime = millis();
+      showNetworkStats = !showNetworkStats; // Toggle stats screen
+      playChime(true);
+    }
+  }
+  lastButtonState = currentButtonState;
+
+  uint32_t now = millis();
+
+  // If viewing network stats, refresh screen periodically and skip eyes/quotes loop
+  if (showNetworkStats) {
+    renderScene();
+    delay(500);
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED && !isSleeping && !celebrationActive && !lowBatteryAlertActive) {
+    if (now - lastNewsFetchMillis >= NEWS_FETCH_INTERVAL_MS) {
+      lastNewsFetchMillis = now;
+      fetchSkyNews();
+    }
+  }
+
+  if (!lowBatteryAlertActive) {
+    checkScheduledQuotes();
+  }
+
+  if (sleepTransitionActive) {
+    uint32_t tElapsed = now - sleepTransitionTimer;
+    if (isSleeping) {
+      if (tElapsed < 400) {
+        targetEyes = {114, 175, 254, 175, 100, 60, 20, 0.4f, 0};
+      } else if (tElapsed < 800) {
+        targetEyes = {114, 170, 254, 170, 100, 80, 25, 0.2f, 0};
+      } else if (tElapsed < 1300) {
+        targetEyes = {114, 180, 254, 180, 100, 40, 15, 0.7f, 0};
+      } else if (tElapsed < 1700) {
+        targetEyes = {114, 178, 254, 178, 100, 50, 18, 0.5f, 0};
+      } else if (tElapsed < 2400) {
+        targetEyes = {114, 185, 254, 185, 105, 20, 8, 0.95f, 0};
+      } else {
+        sleepTransitionActive = false;
+      }
+    } else {
+      if (tElapsed < 600) {
+        targetEyes = {114, 160, 254, 160, 100, 110, 35, 0.0f, 0};
+      } else {
+        sleepTransitionActive = false;
+      }
+    }
+  }
+
+  if (!sleepTransitionActive) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      int hour = timeinfo.tm_hour;
+      int min = timeinfo.tm_min;
+      int sec = timeinfo.tm_sec;
+
+      bool shouldSleep = false;
+      if (sleepStartHour > sleepEndHour) {
+        shouldSleep = (hour >= sleepStartHour || hour < sleepEndHour);
+      } else {
+        shouldSleep = (hour >= sleepStartHour && hour < sleepEndHour);
+      }
+
+      if (shouldSleep != isSleeping) {
+        startSleepTransition(shouldSleep);
+      }
+
+      if (!isSleeping && hour == lunchHour && min == 0 && sleepTransitionActive == false && !eatingActive && !celebrationActive && !lowBatteryAlertActive) {
+        eatingActive = true; eatingType = 1; eatingStartTime = now;
+        targetEyes = {114, 165, 254, 165, 110, 75, 20, 0.0f, 1}; playChime(true);
+      }
+
+      if (!isSleeping && hour == dinnerHour && min == 0 && sleepTransitionActive == false && !eatingActive && !celebrationActive && !lowBatteryAlertActive) {
+        eatingActive = true; eatingType = 2; eatingStartTime = now;
+        targetEyes = {114, 165, 254, 165, 110, 75, 20, 0.0f, 1}; playChime(true);
+      }
+    }
+  }
+
+  float easing = 0.15f;
+  float diff = abs(targetEyes.leftX - currentEyes.leftX) + 1.0f; 
+
+  if (diff > 0.05f || isSleeping || eatingActive || sleepTransitionActive || newsTickerActive || quoteDisplayActive || timerActive || celebrationActive || lowBatteryAlertActive) {
+    currentEyes.leftX += (targetEyes.leftX - currentEyes.leftX) * easing;
+    currentEyes.leftY += (targetEyes.leftY - currentEyes.leftY) * easing;
+    currentEyes.rightX += (targetEyes.rightX - currentEyes.rightX) * easing;
+    currentEyes.rightY += (targetEyes.rightY - currentEyes.rightY) * easing;
+    currentEyes.width += (targetEyes.width - currentEyes.width) * easing;
+    currentEyes.height += (targetEyes.height - currentEyes.height) * easing;
+    currentEyes.cornerRadius += (targetEyes.cornerRadius - currentEyes.cornerRadius) * easing;
+    currentEyes.blinkAmount += (targetEyes.blinkAmount - currentEyes.blinkAmount) * easing;
+    currentEyes.shapeType = targetEyes.shapeType;
+
+    renderScene();
+    delay(20);
+  } else {
+    delay(40);
+  }
+
+  if (!isSleeping && !eatingActive && !sleepTransitionActive && !celebrationActive && !lowBatteryAlertActive) {
+    if (!isBlinking && random(0, 70) == 1) {
+      isBlinking = true;
+      targetEyes.blinkAmount = 0.95f;
+      blinkTimer = now + 120;
+    }
+    if (isBlinking && now >= blinkTimer) {
+      isBlinking = false;
+      targetEyes.blinkAmount = 0.0f;
+    }
+
+    if (now - lastActionTime >= nextInterval) {
+      lastActionTime = now;
+      nextInterval = random(3000, 6000);
+
+      if (now - lastRareExpressionMillis >= RARE_EXPRESSION_INTERVAL_MS) {
+        lastRareExpressionMillis = now;
+        int rareExp = random(2, 4); 
+        applyExpression(rareExp);
+      } else {
+        int normalExp = random(0, 2); 
+        applyExpression(normalExp);
+      }
+    }
+  } else if ((isSleeping || celebrationActive || lowBatteryAlertActive) && !sleepTransitionActive) {
+    renderScene();
+    delay(40);
+  }
+}
